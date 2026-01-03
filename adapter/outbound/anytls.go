@@ -24,22 +24,23 @@ type AnyTLS struct {
 
 type AnyTLSOption struct {
 	BasicOption
-	Name                     string     `proxy:"name"`
-	Server                   string     `proxy:"server"`
-	Port                     int        `proxy:"port"`
-	Password                 string     `proxy:"password"`
-	ALPN                     []string   `proxy:"alpn,omitempty"`
-	SNI                      string     `proxy:"sni,omitempty"`
-	ECHOpts                  ECHOptions `proxy:"ech-opts,omitempty"`
-	ClientFingerprint        string     `proxy:"client-fingerprint,omitempty"`
-	SkipCertVerify           bool       `proxy:"skip-cert-verify,omitempty"`
-	Fingerprint              string     `proxy:"fingerprint,omitempty"`
-	Certificate              string     `proxy:"certificate,omitempty"`
-	PrivateKey               string     `proxy:"private-key,omitempty"`
-	UDP                      bool       `proxy:"udp,omitempty"`
-	IdleSessionCheckInterval int        `proxy:"idle-session-check-interval,omitempty"`
-	IdleSessionTimeout       int        `proxy:"idle-session-timeout,omitempty"`
-	MinIdleSession           int        `proxy:"min-idle-session,omitempty"`
+	Name                     string         `proxy:"name"`
+	Server                   string         `proxy:"server"`
+	Port                     int            `proxy:"port"`
+	Password                 string         `proxy:"password"`
+	ALPN                     []string       `proxy:"alpn,omitempty"`
+	SNI                      string         `proxy:"sni,omitempty"`
+	ECHOpts                  ECHOptions     `proxy:"ech-opts,omitempty"`
+	ClientFingerprint        string         `proxy:"client-fingerprint,omitempty"`
+	SkipCertVerify           bool           `proxy:"skip-cert-verify,omitempty"`
+	Fingerprint              string         `proxy:"fingerprint,omitempty"`
+	Certificate              string         `proxy:"certificate,omitempty"`
+	PrivateKey               string         `proxy:"private-key,omitempty"`
+	UDP                      bool           `proxy:"udp,omitempty"`
+	IdleSessionCheckInterval int            `proxy:"idle-session-check-interval,omitempty"`
+	IdleSessionTimeout       int            `proxy:"idle-session-timeout,omitempty"`
+	MinIdleSession           int            `proxy:"min-idle-session,omitempty"`
+	RealityOpts              RealityOptions `proxy:"reality-opts,omitempty"`
 }
 
 func (t *AnyTLS) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {
@@ -115,6 +116,10 @@ func NewAnyTLS(option AnyTLSOption) (*AnyTLS, error) {
 	if err != nil {
 		return nil, err
 	}
+	realityConfig, err := option.RealityOpts.Parse()
+	if err != nil {
+		return nil, err
+	}
 	tlsConfig := &vmess.TLSConfig{
 		Host:              option.SNI,
 		SkipCertVerify:    option.SkipCertVerify,
@@ -124,6 +129,7 @@ func NewAnyTLS(option AnyTLSOption) (*AnyTLS, error) {
 		PrivateKey:        option.PrivateKey,
 		ClientFingerprint: option.ClientFingerprint,
 		ECH:               echConfig,
+		Reality:           realityConfig,
 	}
 	if tlsConfig.Host == "" {
 		tlsConfig.Host = option.Server

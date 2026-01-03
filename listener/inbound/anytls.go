@@ -12,12 +12,13 @@ import (
 type AnyTLSOption struct {
 	BaseOption
 	Users          map[string]string `inbound:"users,omitempty"`
-	Certificate    string            `inbound:"certificate"`
-	PrivateKey     string            `inbound:"private-key"`
+	Certificate    string            `inbound:"certificate,omitempty"`
+	PrivateKey     string            `inbound:"private-key,omitempty"`
 	ClientAuthType string            `inbound:"client-auth-type,omitempty"`
 	ClientAuthCert string            `inbound:"client-auth-cert,omitempty"`
 	EchKey         string            `inbound:"ech-key,omitempty"`
 	PaddingScheme  string            `inbound:"padding-scheme,omitempty"`
+	RealityConfig  RealityConfig     `inbound:"reality-config,omitempty"`
 }
 
 func (o AnyTLSOption) Equal(config C.InboundConfig) bool {
@@ -49,6 +50,7 @@ func NewAnyTLS(options *AnyTLSOption) (*AnyTLS, error) {
 			ClientAuthCert: options.ClientAuthCert,
 			EchKey:         options.EchKey,
 			PaddingScheme:  options.PaddingScheme,
+			RealityConfig:  options.RealityConfig.Build(),
 		},
 	}, nil
 }

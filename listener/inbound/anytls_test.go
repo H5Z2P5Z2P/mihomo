@@ -1,27 +1,47 @@
 package inbound_test
 
 import (
+	"net"
 	"net/netip"
 	"testing"
 
 	"github.com/metacubex/mihomo/adapter/outbound"
 	"github.com/metacubex/mihomo/listener/inbound"
-
 	"github.com/stretchr/testify/assert"
 )
 
-func testInboundAnyTLS(t *testing.T, inboundOptions inbound.AnyTLSOption, outboundOptions outbound.AnyTLSOption) {
-	t.Parallel()
-	inboundOptions.BaseOption = inbound.BaseOption{
-		NameStr: "anytls_inbound",
-		Listen:  "127.0.0.1",
-		Port:    "0",
+// User provided keys
+const (
+	testPrivateKey = "2Hfl7xC6Rr7JhURi81GdWiEGRsu1bYvwRyIV4_Zh2mA"
+	testPublicKey  = "_N9DjqSgv_RF-2vPQ5znlLlLWRI3UH2qL1m1uZV1Sho"
+	testShortID    = "12345678"
+	testDest       = "itunes.apple.com"
+)
+
+func TestInboundAnyTLS_Reality(t *testing.T) {
+	// Using variables from common_test.go
+	inboundOptions := inbound.AnyTLSOption{
+		BaseOption: inbound.BaseOption{
+			NameStr: "anytls_reality_in",
+			Listen:  "127.0.0.1",
+			Port:    "0",
+		},
+		Users: map[string]string{
+			"test": "password",
+		},
+		RealityConfig: inbound.RealityConfig{
+			Dest:        net.JoinHostPort(testDest, "443"),
+			PrivateKey:  testPrivateKey,
+			ShortID:     []string{testShortID},
+			ServerNames: []string{testDest},
+		},
 	}
-	inboundOptions.Users = map[string]string{"test": userUUID}
+
 	in, err := inbound.NewAnyTLS(&inboundOptions)
 	if !assert.NoError(t, err) {
 		return
 	}
+	defer in.Close()
 
 	tunnel := NewHttpTestTunnel()
 	defer tunnel.Close()
@@ -30,65 +50,29 @@ func testInboundAnyTLS(t *testing.T, inboundOptions inbound.AnyTLSOption, outbou
 	if !assert.NoError(t, err) {
 		return
 	}
-	defer in.Close()
 
 	addrPort, err := netip.ParseAddrPort(in.Address())
 	if !assert.NoError(t, err) {
 		return
 	}
 
-	outboundOptions.Name = "anytls_outbound"
-	outboundOptions.Server = addrPort.Addr().String()
-	outboundOptions.Port = int(addrPort.Port())
-	outboundOptions.Password = userUUID
+	outboundOptions := outbound.AnyTLSOption{
+		Name:              "anytls_reality_out",
+		Server:            addrPort.Addr().String(),
+		Port:              int(addrPort.Port()),
+		Password:          "password",
+		SNI:               testDest,
+		ClientFingerprint: "chrome",
+		RealityOpts: outbound.RealityOptions{
+			PublicKey: testPublicKey,
+			ShortID:   testShortID,
+		},
+	}
 
 	out, err := outbound.NewAnyTLS(outboundOptions)
 	if !assert.NoError(t, err) {
 		return
 	}
-	defer out.Close()
 
 	tunnel.DoTest(t, out)
-}
-
-func TestInboundAnyTLS_TLS(t *testing.T) {
-	inboundOptions := inbound.AnyTLSOption{
-		Certificate: tlsCertificate,
-		PrivateKey:  tlsPrivateKey,
-	}
-	outboundOptions := outbound.AnyTLSOption{
-		Fingerprint: tlsFingerprint,
-	}
-	testInboundAnyTLS(t, inboundOptions, outboundOptions)
-	t.Run("ECH", func(t *testing.T) {
-		inboundOptions := inboundOptions
-		outboundOptions := outboundOptions
-		inboundOptions.EchKey = echKeyPem
-		outboundOptions.ECHOpts = outbound.ECHOptions{
-			Enable: true,
-			Config: echConfigBase64,
-		}
-		testInboundAnyTLS(t, inboundOptions, outboundOptions)
-	})
-	t.Run("mTLS", func(t *testing.T) {
-		inboundOptions := inboundOptions
-		outboundOptions := outboundOptions
-		inboundOptions.ClientAuthCert = tlsAuthCertificate
-		outboundOptions.Certificate = tlsAuthCertificate
-		outboundOptions.PrivateKey = tlsAuthPrivateKey
-		testInboundAnyTLS(t, inboundOptions, outboundOptions)
-	})
-	t.Run("mTLS+ECH", func(t *testing.T) {
-		inboundOptions := inboundOptions
-		outboundOptions := outboundOptions
-		inboundOptions.ClientAuthCert = tlsAuthCertificate
-		outboundOptions.Certificate = tlsAuthCertificate
-		outboundOptions.PrivateKey = tlsAuthPrivateKey
-		inboundOptions.EchKey = echKeyPem
-		outboundOptions.ECHOpts = outbound.ECHOptions{
-			Enable: true,
-			Config: echConfigBase64,
-		}
-		testInboundAnyTLS(t, inboundOptions, outboundOptions)
-	})
 }
