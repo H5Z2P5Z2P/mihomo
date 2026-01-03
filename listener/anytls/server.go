@@ -15,6 +15,7 @@ import (
 	"github.com/metacubex/mihomo/component/ech"
 	C "github.com/metacubex/mihomo/constant"
 	LC "github.com/metacubex/mihomo/listener/config"
+	"github.com/metacubex/mihomo/listener/reality"
 	"github.com/metacubex/mihomo/listener/sing"
 	"github.com/metacubex/mihomo/ntp"
 	"github.com/metacubex/mihomo/transport/anytls/padding"
@@ -74,6 +75,20 @@ func New(config LC.AnyTLSServer, tunnel C.Tunnel, additions ...inbound.Addition)
 		tlsConfig.ClientCAs = pool
 	}
 
+	var realityBuilder *reality.Builder
+	if config.RealityConfig.PrivateKey != "" {
+		if tlsConfig.GetCertificate != nil {
+			return nil, errors.New("certificate is unavailable in reality")
+		}
+		if tlsConfig.ClientAuth != tls.NoClientCert {
+			return nil, errors.New("client-auth is unavailable in reality")
+		}
+		realityBuilder, err = config.RealityConfig.Build(tunnel)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	sl = &Listener{
 		config:    config,
 		tlsConfig: tlsConfig,
@@ -110,10 +125,12 @@ func New(config LC.AnyTLSServer, tunnel C.Tunnel, additions ...inbound.Addition)
 		if err != nil {
 			return nil, err
 		}
-		if tlsConfig.GetCertificate != nil {
+		if realityBuilder != nil {
+			l = realityBuilder.NewListener(l)
+		} else if tlsConfig.GetCertificate != nil {
 			l = tls.NewListener(l, tlsConfig)
 		} else {
-			return nil, errors.New("disallow using AnyTLS without certificates config")
+			return nil, errors.New("disallow using AnyTLS without certificates/reality config")
 		}
 		sl.listeners = append(sl.listeners, l)
 

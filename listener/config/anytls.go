@@ -2,6 +2,8 @@ package config
 
 import (
 	"encoding/json"
+
+	"github.com/metacubex/mihomo/listener/reality"
 )
 
 type AnyTLSServer struct {
@@ -14,6 +16,7 @@ type AnyTLSServer struct {
 	ClientAuthCert string            `yaml:"client-auth-cert" json:"client-auth-cert,omitempty"`
 	EchKey         string            `yaml:"ech-key" json:"ech-key"`
 	PaddingScheme  string            `yaml:"padding-scheme" json:"padding-scheme,omitempty"`
+	RealityConfig  reality.Config    `yaml:"reality-config" json:"reality-config"`
 }
 
 func (t AnyTLSServer) String() string {

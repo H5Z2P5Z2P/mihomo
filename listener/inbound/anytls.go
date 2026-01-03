@@ -18,6 +18,7 @@ type AnyTLSOption struct {
 	ClientAuthCert string            `inbound:"client-auth-cert,omitempty"`
 	EchKey         string            `inbound:"ech-key,omitempty"`
 	PaddingScheme  string            `inbound:"padding-scheme,omitempty"`
+	RealityConfig  RealityConfig     `inbound:"reality-config,omitempty"`
 }
 
 func (o AnyTLSOption) Equal(config C.InboundConfig) bool {
@@ -49,6 +50,7 @@ func NewAnyTLS(options *AnyTLSOption) (*AnyTLS, error) {
 			ClientAuthCert: options.ClientAuthCert,
 			EchKey:         options.EchKey,
 			PaddingScheme:  options.PaddingScheme,
+			RealityConfig:  options.RealityConfig.Build(),
 		},
 	}, nil
 }
