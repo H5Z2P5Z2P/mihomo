@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
+	N "github.com/metacubex/mihomo/common/net"
+	"github.com/metacubex/mihomo/common/utils"
 	C "github.com/metacubex/mihomo/constant"
 	LC "github.com/metacubex/mihomo/listener/config"
 	"github.com/metacubex/mihomo/listener/sing"
@@ -20,6 +22,7 @@ type Listener struct {
 	addr      string
 	closed    bool
 	protoConf sudoku.ProtocolConfig
+	tunnelSrv *sudoku.HTTPMaskTunnelServer
 	handler   *sing.ListenerHandler
 }
 
@@ -46,15 +49,57 @@ func (l *Listener) Close() error {
 }
 
 func (l *Listener) handleConn(conn net.Conn, tunnel C.Tunnel, additions ...inbound.Addition) {
-	session, err := sudoku.ServerHandshake(conn, &l.protoConf)
+	handshakeConn := conn
+	handshakeCfg := &l.protoConf
+	if l.tunnelSrv != nil {
+		c, cfg, done, err := l.tunnelSrv.WrapConn(conn)
+		if err != nil {
+			_ = conn.Close()
+			return
+		}
+		if done {
+			return
+		}
+		if c != nil {
+			handshakeConn = c
+		}
+		if cfg != nil {
+			handshakeCfg = cfg
+		}
+	}
+
+	session, err := sudoku.ServerHandshake(handshakeConn, handshakeCfg)
 	if err != nil {
-		_ = conn.Close()
+		_ = handshakeConn.Close()
+		if handshakeConn != conn {
+			_ = conn.Close()
+		}
 		return
 	}
 
 	switch session.Type {
 	case sudoku.SessionTypeUoT:
 		l.handleUoTSession(session.Conn, tunnel, additions...)
+	case sudoku.SessionTypeMultiplex:
+		mux, err := sudoku.AcceptMultiplexServer(session.Conn)
+		if err != nil {
+			_ = session.Conn.Close()
+			return
+		}
+		defer mux.Close()
+
+		for {
+			stream, target, err := mux.AcceptTCP()
+			if err != nil {
+				return
+			}
+			targetAddr := socks5.ParseAddr(target)
+			if targetAddr == nil {
+				_ = stream.Close()
+				continue
+			}
+			go l.handler.HandleSocket(targetAddr, stream, additions...)
+		}
 	default:
 		targetAddr := socks5.ParseAddr(session.Target)
 		if targetAddr == nil {
@@ -69,6 +114,7 @@ func (l *Listener) handleConn(conn net.Conn, tunnel C.Tunnel, additions ...inbou
 func (l *Listener) handleUoTSession(conn net.Conn, tunnel C.Tunnel, additions ...inbound.Addition) {
 	writer := sudoku.NewUoTPacketConn(conn)
 	remoteAddr := conn.RemoteAddr()
+	connID := utils.NewUUIDV4().String() // make a new SNAT key
 
 	for {
 		addrStr, payload, err := sudoku.ReadDatagram(conn)
@@ -86,12 +132,13 @@ func (l *Listener) handleUoTSession(conn net.Conn, tunnel C.Tunnel, additions ..
 			continue
 		}
 
-		packet := &uotPacket{
+		cPacket := &uotPacket{
 			payload: payload,
 			writer:  writer,
 			rAddr:   remoteAddr,
 		}
-		tunnel.HandleUDPPacket(inbound.NewPacket(target, packet, C.SUDOKU, additions...))
+		cPacket.rAddr = N.NewCustomAddr(C.SUDOKU.String(), connID, cPacket.rAddr) // for tunnel's handleUDPConn
+		tunnel.HandleUDPPacket(inbound.NewPacket(target, cPacket, C.SUDOKU, additions...))
 	}
 }
 
@@ -184,6 +231,9 @@ func New(config LC.SudokuServer, tunnel C.Tunnel, additions ...inbound.Addition)
 		PaddingMax:              paddingMax,
 		EnablePureDownlink:      enablePureDownlink,
 		HandshakeTimeoutSeconds: handshakeTimeout,
+		DisableHTTPMask:         config.DisableHTTPMask,
+		HTTPMaskMode:            config.HTTPMaskMode,
+		HTTPMaskPathRoot:        strings.TrimSpace(config.PathRoot),
 	}
 	if len(tables) == 1 {
 		protoConf.Table = tables[0]
@@ -200,6 +250,7 @@ func New(config LC.SudokuServer, tunnel C.Tunnel, additions ...inbound.Addition)
 		protoConf: protoConf,
 		handler:   h,
 	}
+	sl.tunnelSrv = sudoku.NewHTTPMaskTunnelServer(&sl.protoConf)
 
 	go func() {
 		for {

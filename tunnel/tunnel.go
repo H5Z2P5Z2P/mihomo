@@ -208,20 +208,6 @@ func Proxies() map[string]C.Proxy {
 	return proxies
 }
 
-func ProxiesWithProviders() map[string]C.Proxy {
-	allProxies := make(map[string]C.Proxy)
-	for name, proxy := range proxies {
-		allProxies[name] = proxy
-	}
-	for _, p := range providers {
-		for _, proxy := range p.Proxies() {
-			name := proxy.Name()
-			allProxies[name] = proxy
-		}
-	}
-	return allProxies
-}
-
 // Providers return all compatible providers
 func Providers() map[string]P.ProxyProvider {
 	return providers
@@ -299,7 +285,8 @@ func preHandleMetadata(metadata *C.Metadata) error {
 		if exist {
 			metadata.Host = host
 			metadata.DNSMode = C.DNSMapping
-			if resolver.FakeIPEnabled() {
+			if resolver.IsFakeIP(metadata.DstIP) {
+				// only clear dstIP if it is confirmed to be a fake IP
 				metadata.DstIP = netip.Addr{}
 				metadata.DNSMode = C.DNSFakeIP
 			} else if node, ok := resolver.DefaultHosts.Search(host, false); ok {
