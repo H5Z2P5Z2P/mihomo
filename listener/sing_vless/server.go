@@ -148,7 +148,7 @@ func New(config LC.VlessServer, tunnel C.Tunnel, additions ...inbound.Addition) 
 	}
 	if config.XHTTPConfig.Mode != "" {
 		switch config.XHTTPConfig.Mode {
-		case "auto":
+		case "auto", "packet-up", "stream-up", "stream-one":
 		default:
 			return nil, errors.New("unsupported xhttp mode")
 		}

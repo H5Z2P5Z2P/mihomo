@@ -44,6 +44,14 @@ func testInboundVless(t *testing.T, inboundOptions inbound.VlessOption, outbound
 	outboundOptions.Server = addrPort.Addr().String()
 	outboundOptions.Port = int(addrPort.Port())
 	outboundOptions.UUID = userUUID
+	if outboundOptions.XHTTPOpts.Download != nil {
+		if outboundOptions.XHTTPOpts.Download.Address == "" {
+			outboundOptions.XHTTPOpts.Download.Address = addrPort.Addr().String()
+		}
+		if outboundOptions.XHTTPOpts.Download.Port == 0 {
+			outboundOptions.XHTTPOpts.Download.Port = int(addrPort.Port())
+		}
+	}
 
 	out, err := outbound.NewVless(outboundOptions)
 	if !assert.NoError(t, err) {
@@ -226,7 +234,7 @@ func TestInboundVless_Wss1(t *testing.T) {
 		Network:     "ws",
 		WSOpts:      outbound.WSOptions{Path: "/ws"},
 	}
-	testInboundVlessTLS(t, inboundOptions, outboundOptions, false)
+	testInboundVless(t, inboundOptions, outboundOptions)
 }
 
 func TestInboundVless_Wss2(t *testing.T) {
@@ -242,7 +250,7 @@ func TestInboundVless_Wss2(t *testing.T) {
 		Network:     "ws",
 		WSOpts:      outbound.WSOptions{Path: "/ws"},
 	}
-	testInboundVlessTLS(t, inboundOptions, outboundOptions, false)
+	testInboundVless(t, inboundOptions, outboundOptions)
 }
 
 func TestInboundVless_Grpc1(t *testing.T) {
@@ -257,7 +265,7 @@ func TestInboundVless_Grpc1(t *testing.T) {
 		Network:     "grpc",
 		GrpcOpts:    outbound.GrpcOptions{GrpcServiceName: "GunService"},
 	}
-	testInboundVlessTLS(t, inboundOptions, outboundOptions, false)
+	testInboundVless(t, inboundOptions, outboundOptions)
 }
 
 func TestInboundVless_Grpc2(t *testing.T) {
@@ -364,6 +372,35 @@ func TestInboundVless_XHTTP(t *testing.T) {
 	testInboundVlessTLS(t, inboundOptions, outboundOptions, false)
 }
 
+func TestInboundVless_XHTTP_DownloadSettings(t *testing.T) {
+	inboundOptions := inbound.VlessOption{
+		Certificate: tlsCertificate,
+		PrivateKey:  tlsPrivateKey,
+		XHTTPConfig: inbound.XHTTPConfig{
+			Path: "/vless-xhttp",
+			Host: "example.com",
+			Mode: "auto",
+		},
+	}
+	outboundOptions := outbound.VlessOption{
+		TLS:         true,
+		Fingerprint: tlsFingerprint,
+		Network:     "xhttp",
+		XHTTPOpts: outbound.XHTTPOptions{
+			Path: "/vless-xhttp",
+			Host: "example.com",
+			Mode: "auto",
+			Download: &outbound.XHTTPDownloadOptions{
+				TLS:         true,
+				Fingerprint: tlsFingerprint,
+				Path:        "/vless-xhttp",
+				Host:        "example.com",
+			},
+		},
+	}
+	testInboundVless(t, inboundOptions, outboundOptions)
+}
+
 func TestInboundVless_Reality_XHTTP(t *testing.T) {
 	inboundOptions := inbound.VlessOption{
 		RealityConfig: inbound.RealityConfig{
@@ -387,6 +424,43 @@ func TestInboundVless_Reality_XHTTP(t *testing.T) {
 		Network:           "xhttp",
 		XHTTPOpts: outbound.XHTTPOptions{
 			Mode: "auto",
+		},
+	}
+	testInboundVless(t, inboundOptions, outboundOptions)
+}
+
+func TestInboundVless_Reality_XHTTP_DownloadSettings(t *testing.T) {
+	inboundOptions := inbound.VlessOption{
+		RealityConfig: inbound.RealityConfig{
+			Dest:        net.JoinHostPort(realityDest, "443"),
+			PrivateKey:  realityPrivateKey,
+			ShortID:     []string{realityShortid},
+			ServerNames: []string{realityDest},
+		},
+		XHTTPConfig: inbound.XHTTPConfig{
+			Mode: "auto",
+		},
+	}
+	outboundOptions := outbound.VlessOption{
+		TLS:        true,
+		ServerName: realityDest,
+		RealityOpts: outbound.RealityOptions{
+			PublicKey: realityPublickey,
+			ShortID:   realityShortid,
+		},
+		ClientFingerprint: "chrome",
+		Network:           "xhttp",
+		XHTTPOpts: outbound.XHTTPOptions{
+			Mode: "auto",
+			Download: &outbound.XHTTPDownloadOptions{
+				TLS:        true,
+				ServerName: realityDest,
+				RealityOpts: outbound.RealityOptions{
+					PublicKey: realityPublickey,
+					ShortID:   realityShortid,
+				},
+				ClientFingerprint: "chrome",
+			},
 		},
 	}
 	testInboundVless(t, inboundOptions, outboundOptions)

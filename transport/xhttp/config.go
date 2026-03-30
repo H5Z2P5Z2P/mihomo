@@ -27,12 +27,15 @@ func (c *Config) NormalizedMode() string {
 	return c.Mode
 }
 
-func (c *Config) EffectiveMode(hasReality bool) string {
+func (c *Config) EffectiveMode(hasReality bool, hasDownloadSettings bool) string {
 	mode := c.NormalizedMode()
 	if mode != "auto" {
 		return mode
 	}
 	if hasReality {
+		if hasDownloadSettings {
+			return "stream-up"
+		}
 		return "stream-one"
 	}
 	return "packet-up"

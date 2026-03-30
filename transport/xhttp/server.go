@@ -242,6 +242,28 @@ func (h *requestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// stream-up upload: POST /path/{session}
+	if r.Method == http.MethodPost && len(parts) == 1 {
+		sessionID := parts[0]
+		session := h.getOrCreateSession(sessionID)
+		session.markConnected()
+
+		if err := session.uploadQueue.PushReader(r.Body); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+
+		<-r.Context().Done()
+		return
+	}
+
 	// packet-up upload: POST /path/{session}/{seq}
 	if r.Method == http.MethodPost && len(parts) == 2 {
 		sessionID := parts[0]

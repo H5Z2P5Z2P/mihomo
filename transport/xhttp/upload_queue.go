@@ -1,6 +1,7 @@
 package xhttp
 
 import (
+	"errors"
 	"io"
 	"sync"
 )
@@ -16,6 +17,7 @@ type uploadQueue struct {
 	packets map[uint64][]byte
 	nextSeq uint64
 	buf     []byte
+	stream  io.Reader
 	closed  bool
 }
 
@@ -42,6 +44,22 @@ func (q *uploadQueue) Push(p Packet) error {
 	return nil
 }
 
+func (q *uploadQueue) PushReader(r io.Reader) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if q.closed {
+		return io.ErrClosedPipe
+	}
+	if q.stream != nil {
+		return errors.New("xhttp stream already exists")
+	}
+
+	q.stream = r
+	q.cond.Broadcast()
+	return nil
+}
+
 func (q *uploadQueue) Read(b []byte) (int, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -60,6 +78,24 @@ func (q *uploadQueue) Read(b []byte) (int, error) {
 			continue
 		}
 
+		if stream := q.stream; stream != nil {
+			q.mu.Unlock()
+			n, err := stream.Read(b)
+			q.mu.Lock()
+
+			if err == io.EOF {
+				if q.stream == stream {
+					q.stream = nil
+				}
+				if n > 0 {
+					return n, nil
+				}
+				return 0, io.EOF
+			}
+
+			return n, err
+		}
+
 		if q.closed {
 			return 0, io.EOF
 		}
@@ -73,6 +109,9 @@ func (q *uploadQueue) Close() error {
 	defer q.mu.Unlock()
 
 	q.closed = true
+	if closer, ok := q.stream.(io.Closer); ok {
+		_ = closer.Close()
+	}
 	q.cond.Broadcast()
 	return nil
 }
