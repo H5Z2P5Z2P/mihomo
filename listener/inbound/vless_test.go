@@ -11,6 +11,18 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func stringPtr(s string) *string {
+	return &s
+}
+
+func intPtr(v int) *int {
+	return &v
+}
+
+func boolPtr(v bool) *bool {
+	return &v
+}
+
 func testInboundVless(t *testing.T, inboundOptions inbound.VlessOption, outboundOptions outbound.VlessOption) {
 	t.Parallel()
 	inboundOptions.BaseOption = inbound.BaseOption{
@@ -44,6 +56,14 @@ func testInboundVless(t *testing.T, inboundOptions inbound.VlessOption, outbound
 	outboundOptions.Server = addrPort.Addr().String()
 	outboundOptions.Port = int(addrPort.Port())
 	outboundOptions.UUID = userUUID
+	if outboundOptions.XHTTPOpts.DownloadSettings != nil {
+		if outboundOptions.XHTTPOpts.DownloadSettings.Server == nil {
+			outboundOptions.XHTTPOpts.DownloadSettings.Server = stringPtr(addrPort.Addr().String())
+		}
+		if outboundOptions.XHTTPOpts.DownloadSettings.Port == nil {
+			outboundOptions.XHTTPOpts.DownloadSettings.Port = intPtr(int(addrPort.Port()))
+		}
+	}
 
 	out, err := outbound.NewVless(outboundOptions)
 	if !assert.NoError(t, err) {
@@ -392,6 +412,43 @@ func TestInboundVless_Reality_XHTTP(t *testing.T) {
 	testInboundVless(t, inboundOptions, outboundOptions)
 }
 
+func TestInboundVless_Reality_XHTTP_DownloadSettings(t *testing.T) {
+	inboundOptions := inbound.VlessOption{
+		RealityConfig: inbound.RealityConfig{
+			Dest:        net.JoinHostPort(realityDest, "443"),
+			PrivateKey:  realityPrivateKey,
+			ShortID:     []string{realityShortid},
+			ServerNames: []string{realityDest},
+		},
+		XHTTPConfig: inbound.XHTTPConfig{
+			Mode: "auto",
+		},
+	}
+	outboundOptions := outbound.VlessOption{
+		TLS:        true,
+		ServerName: realityDest,
+		RealityOpts: outbound.RealityOptions{
+			PublicKey: realityPublickey,
+			ShortID:   realityShortid,
+		},
+		ClientFingerprint: "chrome",
+		Network:           "xhttp",
+		XHTTPOpts: outbound.XHTTPOptions{
+			Mode: "auto",
+			DownloadSettings: &outbound.XHTTPDownloadSettings{
+				TLS:        boolPtr(true),
+				ServerName: stringPtr(realityDest),
+				RealityOpts: &outbound.RealityOptions{
+					PublicKey: realityPublickey,
+					ShortID:   realityShortid,
+				},
+				ClientFingerprint: stringPtr("chrome"),
+			},
+		},
+	}
+	testInboundVless(t, inboundOptions, outboundOptions)
+}
+
 func TestInboundVless_XHTTP_DownloadSettings(t *testing.T) {
 	for _, mode := range []string{"stream-up", "packet-up"} {
 		t.Run(mode, func(t *testing.T) {
@@ -411,13 +468,18 @@ func TestInboundVless_XHTTP_DownloadSettings(t *testing.T) {
 				ClientFingerprint: "chrome",
 				Network:           "xhttp",
 				XHTTPOpts: outbound.XHTTPOptions{
-					Path:             "/vless-xhttp",
-					Host:             "example.com",
-					Mode:             mode,
-					DownloadSettings: &outbound.XHTTPDownloadSettings{},
+					Path: "/vless-xhttp",
+					Host: "example.com",
+					Mode: mode,
+					DownloadSettings: &outbound.XHTTPDownloadSettings{
+						Path:        stringPtr("/vless-xhttp"),
+						Host:        stringPtr("example.com"),
+						TLS:         boolPtr(true),
+						Fingerprint: stringPtr(tlsFingerprint),
+					},
 				},
 			}
-			testInboundVlessTLS(t, inboundOptions, outboundOptions, false)
+			testInboundVless(t, inboundOptions, outboundOptions)
 		})
 	}
 }
