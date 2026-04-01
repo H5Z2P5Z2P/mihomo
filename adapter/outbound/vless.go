@@ -37,7 +37,7 @@ type Vless struct {
 	// for gun mux
 	gunTransport *gun.Transport
 	// for xhttp
-	dialXHTTPConn func() (net.Conn, error)
+	dialXHTTPConn func(context.Context) (net.Conn, error)
 
 	realityConfig *tlsC.RealityConfig
 	echConfig     *ech.Config
@@ -359,7 +359,7 @@ func (v *Vless) dialContext(ctx context.Context) (c net.Conn, err error) {
 	case "grpc": // gun transport
 		return v.gunTransport.Dial()
 	case "xhttp":
-		return v.dialXHTTPConn()
+		return v.dialXHTTPConn(ctx)
 	default:
 	}
 	return v.dialer.DialContext(ctx, "tcp", v.addr)
@@ -633,27 +633,27 @@ func NewVless(option VlessOption) (*Vless, error) {
 		mode := cfg.EffectiveMode(v.realityConfig != nil)
 		switch mode {
 		case "stream-one":
-			v.dialXHTTPConn = func() (net.Conn, error) {
+			v.dialXHTTPConn = func(ctx context.Context) (net.Conn, error) {
 				transport := makeTransport()
-				return xhttp.DialStreamOne(cfg, transport)
+				return xhttp.DialStreamOneContext(ctx, cfg, transport)
 			}
 		case "stream-up":
-			v.dialXHTTPConn = func() (net.Conn, error) {
+			v.dialXHTTPConn = func(ctx context.Context) (net.Conn, error) {
 				transport := makeTransport()
 				downloadTransport := transport
 				if makeDownloadTransport != nil {
 					downloadTransport = makeDownloadTransport()
 				}
-				return xhttp.DialStreamUp(cfg, transport, downloadTransport)
+				return xhttp.DialStreamUpContext(ctx, cfg, transport, downloadTransport)
 			}
 		case "packet-up":
-			v.dialXHTTPConn = func() (net.Conn, error) {
+			v.dialXHTTPConn = func(ctx context.Context) (net.Conn, error) {
 				transport := makeTransport()
 				downloadTransport := transport
 				if makeDownloadTransport != nil {
 					downloadTransport = makeDownloadTransport()
 				}
-				return xhttp.DialPacketUp(cfg, transport, downloadTransport)
+				return xhttp.DialPacketUpContext(ctx, cfg, transport, downloadTransport)
 			}
 		default:
 			return nil, fmt.Errorf("xhttp mode %s is not implemented yet", mode)

@@ -15,6 +15,13 @@ import (
 	"github.com/metacubex/http/h2c"
 )
 
+const (
+	defaultSessionReapTimeout   = 30 * time.Second
+	defaultMaxUploadPostBytes   = 1_000_000
+	defaultMaxBufferedPostBytes = 30 * defaultMaxUploadPostBytes
+	streamUpReadBufferSize      = 32 * 1024
+)
+
 type ServerOption struct {
 	Path        string
 	Host        string
@@ -82,9 +89,9 @@ type httpSession struct {
 	once        sync.Once
 }
 
-func newHTTPSession() *httpSession {
+func newHTTPSession(maxBufferedPostBytes int) *httpSession {
 	return &httpSession{
-		uploadQueue: NewUploadQueue(),
+		uploadQueue: NewUploadQueue(maxBufferedPostBytes),
 		connected:   make(chan struct{}),
 	}
 }
@@ -101,6 +108,10 @@ type requestHandler struct {
 	mode        string
 	connHandler func(net.Conn)
 	httpHandler http.Handler
+
+	sessionReapTimeout   time.Duration
+	maxBufferedPostBytes int
+	maxUploadPostBytes   int64
 
 	mu       sync.Mutex
 	sessions map[string]*httpSession
@@ -121,12 +132,15 @@ func NewServerHandler(opt ServerOption) http.Handler {
 	// using h2c.NewHandler to ensure we can work in plain http2
 	// and some tls conn is not *tls.Conn (like *reality.Conn)
 	return h2c.NewHandler(&requestHandler{
-		path:        path,
-		host:        opt.Host,
-		mode:        opt.Mode,
-		connHandler: opt.ConnHandler,
-		httpHandler: opt.HttpHandler,
-		sessions:    map[string]*httpSession{},
+		path:                 path,
+		host:                 opt.Host,
+		mode:                 opt.Mode,
+		connHandler:          opt.ConnHandler,
+		httpHandler:          opt.HttpHandler,
+		sessionReapTimeout:   defaultSessionReapTimeout,
+		maxBufferedPostBytes: defaultMaxBufferedPostBytes,
+		maxUploadPostBytes:   defaultMaxUploadPostBytes,
+		sessions:             map[string]*httpSession{},
 	}, &http.Http2Server{
 		IdleTimeout: 30 * time.Second,
 	})
@@ -141,9 +155,56 @@ func (h *requestHandler) getOrCreateSession(sessionID string) *httpSession {
 		return s
 	}
 
-	s = newHTTPSession()
+	s = newHTTPSession(h.maxBufferedPostBytes)
 	h.sessions[sessionID] = s
+	h.scheduleSessionReap(sessionID, s)
 	return s
+}
+
+func (h *requestHandler) connectSession(sessionID string) *httpSession {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	s, ok := h.sessions[sessionID]
+	if !ok {
+		s = newHTTPSession(h.maxBufferedPostBytes)
+		h.sessions[sessionID] = s
+		h.scheduleSessionReap(sessionID, s)
+	}
+	s.markConnected()
+	return s
+}
+
+func (h *requestHandler) scheduleSessionReap(sessionID string, s *httpSession) {
+	timeout := h.sessionReapTimeout
+	if timeout <= 0 {
+		return
+	}
+
+	go func() {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+
+		select {
+		case <-s.connected:
+			return
+		case <-timer.C:
+		}
+
+		h.mu.Lock()
+		defer h.mu.Unlock()
+
+		select {
+		case <-s.connected:
+			return
+		default:
+		}
+
+		if current, ok := h.sessions[sessionID]; ok && current == s {
+			_ = s.uploadQueue.Close()
+			delete(h.sessions, sessionID)
+		}
+	}()
 }
 
 func (h *requestHandler) deleteSession(sessionID string) {
@@ -211,8 +272,7 @@ func (h *requestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// packet-up download: GET /path/{session}
 	if r.Method == http.MethodGet && len(parts) == 1 {
 		sessionID := parts[0]
-		session := h.getOrCreateSession(sessionID)
-		session.markConnected()
+		session := h.connectSession(sessionID)
 
 		w.Header().Set("X-Accel-Buffering", "no")
 		w.Header().Set("Cache-Control", "no-store")
@@ -247,15 +307,17 @@ func (h *requestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		sessionID := parts[0]
 		session := h.getOrCreateSession(sessionID)
 
-		buf := make([]byte, 32*1024)
+		buf := make([]byte, streamUpReadBufferSize)
 		var seq uint64
 
 		for {
 			n, err := r.Body.Read(buf)
 			if n > 0 {
+				payload := make([]byte, n)
+				copy(payload, buf[:n])
 				if pushErr := session.uploadQueue.Push(Packet{
 					Seq:     seq,
-					Payload: buf[:n],
+					Payload: payload,
 				}); pushErr != nil {
 					http.Error(w, pushErr.Error(), http.StatusInternalServerError)
 					return
@@ -288,9 +350,13 @@ func (h *requestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		session := h.getOrCreateSession(sessionID)
 
-		body, err := io.ReadAll(r.Body)
+		body, err := io.ReadAll(io.LimitReader(r.Body, h.maxUploadPostBytes+1))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if int64(len(body)) > h.maxUploadPostBytes {
+			http.Error(w, "xhttp upload body is too large", http.StatusRequestEntityTooLarge)
 			return
 		}
 

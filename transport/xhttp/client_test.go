@@ -1,8 +1,11 @@
 package xhttp
 
 import (
+	"context"
 	"io"
 	"net"
+	"path"
+	"sync"
 	"testing"
 	"time"
 
@@ -86,6 +89,161 @@ func (r *neverReader) Read(_ []byte) (int, error) {
 	select {}
 }
 
+type setupBlockingTransport struct{}
+
+func (t *setupBlockingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	<-req.Context().Done()
+	return nil, req.Context().Err()
+}
+
+type recordingPacketTransport struct {
+	firstPostStarted chan struct{}
+	allowResponse    chan struct{}
+
+	mu     sync.Mutex
+	bodies [][]byte
+}
+
+func (t *recordingPacketTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	t.mu.Lock()
+	t.bodies = append(t.bodies, body)
+	t.mu.Unlock()
+
+	if t.firstPostStarted != nil {
+		select {
+		case <-t.firstPostStarted:
+		default:
+			close(t.firstPostStarted)
+		}
+	}
+
+	if t.allowResponse != nil {
+		<-t.allowResponse
+	}
+
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Body:       io.NopCloser(io.LimitReader(req.Body, 0)),
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
+}
+
+type tracingPacketTransport struct {
+	allowFirstResponse chan struct{}
+	secondPostStarted  chan struct{}
+
+	mu     sync.Mutex
+	seqs   []string
+	bodies [][]byte
+	once   sync.Once
+}
+
+func (t *tracingPacketTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if trace := httptrace.ContextClientTrace(req.Context()); trace != nil {
+		if trace.GotConn != nil {
+			trace.GotConn(httptrace.GotConnInfo{Conn: &testConn{}})
+		}
+		if trace.WroteRequest != nil {
+			trace.WroteRequest(httptrace.WroteRequestInfo{})
+		}
+	}
+
+	seq := path.Base(req.URL.Path)
+
+	t.mu.Lock()
+	index := len(t.seqs)
+	t.seqs = append(t.seqs, seq)
+	t.bodies = append(t.bodies, body)
+	t.mu.Unlock()
+
+	if index == 0 && t.allowFirstResponse != nil {
+		<-t.allowFirstResponse
+	}
+	if index == 1 && t.secondPostStarted != nil {
+		t.once.Do(func() {
+			close(t.secondPostStarted)
+		})
+	}
+
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Body:       io.NopCloser(io.LimitReader(req.Body, 0)),
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
+}
+
+type contextValueTransport struct {
+	key any
+
+	mu       sync.Mutex
+	values   []any
+	methods  []string
+	postSeen chan struct{}
+	once     sync.Once
+}
+
+func (t *contextValueTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if trace := httptrace.ContextClientTrace(req.Context()); trace != nil {
+		if trace.GotConn != nil {
+			trace.GotConn(httptrace.GotConnInfo{Conn: &testConn{}})
+		}
+		if trace.WroteRequest != nil {
+			trace.WroteRequest(httptrace.WroteRequestInfo{})
+		}
+	}
+
+	t.mu.Lock()
+	t.values = append(t.values, req.Context().Value(t.key))
+	t.methods = append(t.methods, req.Method)
+	t.mu.Unlock()
+
+	if req.Method == http.MethodPost && t.postSeen != nil {
+		t.once.Do(func() {
+			close(t.postSeen)
+		})
+	}
+
+	body := io.NopCloser(io.LimitReader(req.Body, 0))
+	if req.Method == http.MethodGet {
+		body = io.NopCloser(&neverReader{})
+	}
+
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Body:       body,
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
+}
+
+func (t *contextValueTransport) valuesFor(method string) []any {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	values := make([]any, 0, len(t.values))
+	for i, gotMethod := range t.methods {
+		if gotMethod == method {
+			values = append(values, t.values[i])
+		}
+	}
+	return values
+}
+
 func TestDialStreamUpDoesNotWaitForDownloadResponse(t *testing.T) {
 	cfg := &Config{
 		Host: "upload.example.com",
@@ -163,4 +321,143 @@ func TestDialPacketUpDoesNotWaitForDownloadResponse(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("DialPacketUp waited for the download response")
 	}
+}
+
+func TestDialPacketUpContextCancellation(t *testing.T) {
+	cfg := &Config{
+		Host: "upload.example.com",
+		Path: "/xhttp",
+		Mode: "packet-up",
+		DownloadConfig: &Config{
+			Host: "download.example.com",
+			Path: "/xhttp",
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := DialPacketUpContext(ctx, cfg, &setupBlockingTransport{}, &setupBlockingTransport{})
+		errCh <- err
+	}()
+
+	cancel()
+
+	select {
+	case err := <-errCh:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("DialPacketUpContext did not stop after context cancellation")
+	}
+}
+
+func TestPacketUpWriterBuffersWritesWhileUploadIsInFlight(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	transport := &recordingPacketTransport{
+		firstPostStarted: make(chan struct{}),
+		allowResponse:    make(chan struct{}),
+	}
+	writer := newPacketUpWriter(ctx, cancel, &Config{Host: "upload.example.com", Path: "/xhttp"}, "session", transport)
+	defer func() {
+		close(transport.allowResponse)
+		_ = writer.Close()
+	}()
+
+	_, err := writer.Write([]byte("hello"))
+	require.NoError(t, err)
+
+	select {
+	case <-transport.firstPostStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first packet upload did not start")
+	}
+
+	writeErrCh := make(chan error, 1)
+	go func() {
+		_, err := writer.Write([]byte("world"))
+		writeErrCh <- err
+	}()
+
+	select {
+	case err := <-writeErrCh:
+		require.NoError(t, err)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("second packet write blocked on in-flight upload")
+	}
+}
+
+func TestPacketUpWriterStartsNextRequestBeforePreviousResponse(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	transport := &tracingPacketTransport{
+		allowFirstResponse: make(chan struct{}),
+		secondPostStarted:  make(chan struct{}),
+	}
+	writer := newPacketUpWriter(ctx, cancel, &Config{Host: "upload.example.com", Path: "/xhttp"}, "session", transport)
+	writer.maxUploadSz = 3
+	defer func() {
+		close(transport.allowFirstResponse)
+		_ = writer.Close()
+	}()
+
+	_, err := writer.Write([]byte("abcdef"))
+	require.NoError(t, err)
+
+	select {
+	case <-transport.secondPostStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second packet request did not start before first response")
+	}
+
+	transport.mu.Lock()
+	seqs := append([]string(nil), transport.seqs...)
+	bodies := append([][]byte(nil), transport.bodies...)
+	transport.mu.Unlock()
+
+	require.Equal(t, []string{"0", "1"}, seqs)
+	require.Equal(t, [][]byte{[]byte("abc"), []byte("def")}, bodies)
+}
+
+func TestDialPacketUpContextPreservesContextValuesAfterSetup(t *testing.T) {
+	type ctxKey string
+	const key ctxKey = "packet-up"
+
+	cfg := &Config{
+		Host: "upload.example.com",
+		Path: "/xhttp",
+		Mode: "packet-up",
+		DownloadConfig: &Config{
+			Host: "download.example.com",
+			Path: "/xhttp",
+		},
+	}
+
+	uploadTransport := &contextValueTransport{key: key, postSeen: make(chan struct{})}
+	downloadTransport := &contextValueTransport{key: key}
+
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), key, "marker"))
+	conn, err := DialPacketUpContext(ctx, cfg, uploadTransport, downloadTransport)
+	require.NoError(t, err)
+	defer func() {
+		_ = conn.Close()
+	}()
+
+	cancel()
+
+	_, err = conn.Write([]byte("hello"))
+	require.NoError(t, err)
+
+	select {
+	case <-uploadTransport.postSeen:
+	case <-time.After(2 * time.Second):
+		t.Fatal("packet-up upload did not start after setup context cancellation")
+	}
+
+	require.Equal(t, []any{"marker"}, downloadTransport.valuesFor(http.MethodGet))
+	require.Equal(t, []any{"marker"}, uploadTransport.valuesFor(http.MethodPost))
 }
