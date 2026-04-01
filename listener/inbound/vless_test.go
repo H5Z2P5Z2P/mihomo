@@ -11,6 +11,18 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func stringPtr(s string) *string {
+	return &s
+}
+
+func intPtr(v int) *int {
+	return &v
+}
+
+func boolPtr(v bool) *bool {
+	return &v
+}
+
 func testInboundVless(t *testing.T, inboundOptions inbound.VlessOption, outboundOptions outbound.VlessOption) {
 	t.Parallel()
 	inboundOptions.BaseOption = inbound.BaseOption{
@@ -44,6 +56,14 @@ func testInboundVless(t *testing.T, inboundOptions inbound.VlessOption, outbound
 	outboundOptions.Server = addrPort.Addr().String()
 	outboundOptions.Port = int(addrPort.Port())
 	outboundOptions.UUID = userUUID
+	if outboundOptions.XHTTPOpts.DownloadSettings != nil {
+		if outboundOptions.XHTTPOpts.DownloadSettings.Server == nil {
+			outboundOptions.XHTTPOpts.DownloadSettings.Server = stringPtr(addrPort.Addr().String())
+		}
+		if outboundOptions.XHTTPOpts.DownloadSettings.Port == nil {
+			outboundOptions.XHTTPOpts.DownloadSettings.Port = intPtr(int(addrPort.Port()))
+		}
+	}
 
 	out, err := outbound.NewVless(outboundOptions)
 	if !assert.NoError(t, err) {
@@ -411,13 +431,18 @@ func TestInboundVless_XHTTP_DownloadSettings(t *testing.T) {
 				ClientFingerprint: "chrome",
 				Network:           "xhttp",
 				XHTTPOpts: outbound.XHTTPOptions{
-					Path:             "/vless-xhttp",
-					Host:             "example.com",
-					Mode:             mode,
-					DownloadSettings: &outbound.XHTTPDownloadSettings{},
+					Path: "/vless-xhttp",
+					Host: "example.com",
+					Mode: mode,
+					DownloadSettings: &outbound.XHTTPDownloadSettings{
+						Path:        stringPtr("/vless-xhttp"),
+						Host:        stringPtr("example.com"),
+						TLS:         boolPtr(true),
+						Fingerprint: stringPtr(tlsFingerprint),
+					},
 				},
 			}
-			testInboundVlessTLS(t, inboundOptions, outboundOptions, false)
+			testInboundVless(t, inboundOptions, outboundOptions)
 		})
 	}
 }

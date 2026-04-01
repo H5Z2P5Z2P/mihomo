@@ -245,11 +245,7 @@ func (h *requestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// stream-up upload: POST /path/{session}
 	if r.Method == http.MethodPost && len(parts) == 1 {
 		sessionID := parts[0]
-		session := h.getSession(sessionID)
-		if session == nil {
-			http.Error(w, "unknown xhttp session", http.StatusBadRequest)
-			return
-		}
+		session := h.getOrCreateSession(sessionID)
 
 		buf := make([]byte, 32*1024)
 		var seq uint64
@@ -290,11 +286,7 @@ func (h *requestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		session := h.getSession(sessionID)
-		if session == nil {
-			http.Error(w, "unknown xhttp session", http.StatusBadRequest)
-			return
-		}
+		session := h.getOrCreateSession(sessionID)
 
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
