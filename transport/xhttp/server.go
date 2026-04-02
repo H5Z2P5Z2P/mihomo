@@ -84,7 +84,7 @@ type httpSession struct {
 
 func newHTTPSession() *httpSession {
 	return &httpSession{
-		uploadQueue: NewUploadQueue(),
+		uploadQueue: NewUploadQueue(0),
 		connected:   make(chan struct{}),
 	}
 }
@@ -328,10 +328,15 @@ func (h *requestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		session := h.getOrCreateSession(sessionID)
+		session.uploadQueue.SetMaxSize(xhttpPacketUpMaxBufferedPosts)
 
-		body, err := io.ReadAll(r.Body)
+		body, err := io.ReadAll(io.LimitReader(r.Body, xhttpPacketUpMaxEachPostBytes+1))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if len(body) > xhttpPacketUpMaxEachPostBytes {
+			http.Error(w, "xhttp packet-up too large", http.StatusRequestEntityTooLarge)
 			return
 		}
 
