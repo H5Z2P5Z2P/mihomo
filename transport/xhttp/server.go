@@ -84,7 +84,7 @@ type httpSession struct {
 
 func newHTTPSession() *httpSession {
 	return &httpSession{
-		uploadQueue: NewUploadQueue(),
+		uploadQueue: NewUploadQueue(xhttpPacketUpMaxBufferedPosts),
 		connected:   make(chan struct{}),
 	}
 }
@@ -256,6 +256,7 @@ func (h *requestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		w.Header().Set("X-Accel-Buffering", "no")
 		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		if flusher, ok := w.(http.Flusher); ok {
 			flusher.Flush()
@@ -326,15 +327,15 @@ func (h *requestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		session := h.getSession(sessionID)
-		if session == nil {
-			http.Error(w, "unknown xhttp session", http.StatusBadRequest)
-			return
-		}
+		session := h.getOrCreateSession(sessionID)
 
-		body, err := io.ReadAll(r.Body)
+		body, err := io.ReadAll(io.LimitReader(r.Body, xhttpPacketUpMaxEachPostBytes+1))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if len(body) > xhttpPacketUpMaxEachPostBytes {
+			http.Error(w, "xhttp packet-up too large", http.StatusRequestEntityTooLarge)
 			return
 		}
 

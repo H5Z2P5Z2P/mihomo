@@ -49,3 +49,27 @@ func TestRequestHandlerCreatesSessionForStreamUpUpload(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 	require.NotNil(t, h.getSession("session"))
 }
+
+func TestRequestHandlerCreatesSessionForPacketUpUpload(t *testing.T) {
+	h := newTestRequestHandler()
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/xhttp/session/0", strings.NewReader("abc"))
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.NotNil(t, h.getSession("session"))
+}
+
+func TestRequestHandlerRejectsOversizePacketUpUpload(t *testing.T) {
+	h := newTestRequestHandler()
+
+	body := strings.Repeat("a", xhttpPacketUpMaxEachPostBytes+1)
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/xhttp/session/0", strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusRequestEntityTooLarge, w.Code)
+}
