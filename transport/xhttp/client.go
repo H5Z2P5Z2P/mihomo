@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"strconv"
 	"sync"
-	"time"
 
 	"github.com/metacubex/mihomo/common/httputils"
 
@@ -30,149 +29,13 @@ type PacketUpWriter struct {
 	sessionID string
 	transport http.RoundTripper
 	writeMu   sync.Mutex
-	mu        sync.Mutex
-	cond      *sync.Cond
-	pending   [][]byte
-	pendingN  int
-	closed    bool
-	err       error
-	done      chan struct{}
 	seq       uint64
-}
-
-func newPacketUpWriter(ctx context.Context, cfg *Config, sessionID string, transport http.RoundTripper) *PacketUpWriter {
-	w := &PacketUpWriter{
-		ctx:       ctx,
-		cfg:       cfg,
-		sessionID: sessionID,
-		transport: transport,
-		done:      make(chan struct{}),
-	}
-	w.cond = sync.NewCond(&w.mu)
-	go w.run()
-	return w
 }
 
 func (c *PacketUpWriter) Write(b []byte) (int, error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 
-	var written int
-	for len(b) > 0 {
-		chunkLen := len(b)
-		if chunkLen > xhttpPacketUpMaxEachPostBytes {
-			chunkLen = xhttpPacketUpMaxEachPostBytes
-		}
-
-		chunk := make([]byte, chunkLen)
-		copy(chunk, b[:chunkLen])
-
-		c.mu.Lock()
-		for c.err == nil && !c.closed && c.pendingN+len(chunk) > xhttpPacketUpMaxEachPostBytes {
-			c.cond.Wait()
-		}
-
-		err := c.err
-		closed := c.closed
-		if err == nil && !closed {
-			c.pending = append(c.pending, chunk)
-			c.pendingN += len(chunk)
-			c.cond.Signal()
-		}
-		c.mu.Unlock()
-
-		if err != nil {
-			return written, err
-		}
-		if closed {
-			return written, io.ErrClosedPipe
-		}
-
-		written += chunkLen
-		b = b[chunkLen:]
-	}
-
-	return written, nil
-}
-
-func (c *PacketUpWriter) run() {
-	defer close(c.done)
-	defer httputils.CloseTransport(c.transport)
-
-	var lastPost time.Time
-	for {
-		batch, err := c.nextBatch()
-		if err != nil {
-			if err == io.EOF {
-				return
-			}
-			c.setErr(err)
-			return
-		}
-
-		if !lastPost.IsZero() {
-			if wait := xhttpPacketUpMinPostsInterval - time.Since(lastPost); wait > 0 {
-				timer := time.NewTimer(wait)
-				select {
-				case <-timer.C:
-				case <-c.ctx.Done():
-					if !timer.Stop() {
-						<-timer.C
-					}
-					c.setErr(c.ctx.Err())
-					return
-				}
-			}
-		}
-		lastPost = time.Now()
-
-		if err := c.postBatch(batch); err != nil {
-			c.setErr(err)
-			return
-		}
-	}
-}
-
-func (c *PacketUpWriter) nextBatch() ([]byte, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	for len(c.pending) == 0 {
-		if c.err != nil {
-			return nil, c.err
-		}
-		if c.closed {
-			return nil, io.EOF
-		}
-		c.cond.Wait()
-	}
-
-	batchSize := c.pendingN
-	if batchSize > xhttpPacketUpMaxEachPostBytes {
-		batchSize = xhttpPacketUpMaxEachPostBytes
-	}
-
-	batch := make([]byte, 0, batchSize)
-	for len(c.pending) > 0 && len(batch) < xhttpPacketUpMaxEachPostBytes {
-		room := xhttpPacketUpMaxEachPostBytes - len(batch)
-		chunk := c.pending[0]
-		if len(chunk) <= room {
-			batch = append(batch, chunk...)
-			c.pending = c.pending[1:]
-			c.pendingN -= len(chunk)
-			continue
-		}
-
-		batch = append(batch, chunk[:room]...)
-		c.pending[0] = chunk[room:]
-		c.pendingN -= room
-	}
-
-	c.cond.Broadcast()
-	return batch, nil
-}
-
-func (c *PacketUpWriter) postBatch(batch []byte) error {
 	u := url.URL{
 		Scheme: "https",
 		Host:   c.cfg.Host,
@@ -181,51 +44,33 @@ func (c *PacketUpWriter) postBatch(batch []byte) error {
 
 	req, err := http.NewRequestWithContext(c.ctx, http.MethodPost, u.String(), nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	seqStr := strconv.FormatUint(c.seq, 10)
 	c.seq++
 
-	if err := c.cfg.FillPacketRequest(req, c.sessionID, seqStr, batch); err != nil {
-		return err
+	if err := c.cfg.FillPacketRequest(req, c.sessionID, seqStr, b); err != nil {
+		return 0, err
 	}
 	req.Host = c.cfg.Host
 
 	resp, err := c.transport.RoundTrip(req)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("xhttp packet-up bad status: %s", resp.Status)
+		return 0, fmt.Errorf("xhttp packet-up bad status: %s", resp.Status)
 	}
 
-	return nil
-}
-
-func (c *PacketUpWriter) setErr(err error) {
-	if err == nil {
-		err = io.ErrClosedPipe
-	}
-
-	c.mu.Lock()
-	if c.err == nil {
-		c.err = err
-	}
-	c.closed = true
-	c.cond.Broadcast()
-	c.mu.Unlock()
+	return len(b), nil
 }
 
 func (c *PacketUpWriter) Close() error {
-	c.mu.Lock()
-	c.closed = true
-	c.cond.Broadcast()
-	c.mu.Unlock()
-	<-c.done
+	httputils.CloseTransport(c.transport)
 	return nil
 }
 
@@ -415,6 +260,54 @@ func openStream(ctx context.Context, addr *httputils.NetAddr, cfg *Config, trans
 	return reader, nil
 }
 
+func startUploadStream(ctx context.Context, cfg *Config, transport http.RoundTripper, requestURL url.URL, sessionID string, body io.Reader, badStatusPrefix string, onError func(error)) error {
+	started := make(chan error, 1)
+	var startedOnce sync.Once
+	signalStarted := func(err error) {
+		startedOnce.Do(func() {
+			started <- err
+		})
+	}
+
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) {
+			signalStarted(nil)
+		},
+	})
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), body)
+	if err != nil {
+		return err
+	}
+	if err := cfg.FillStreamRequest(req, sessionID); err != nil {
+		return err
+	}
+	req.Host = cfg.Host
+
+	go func() {
+		resp, err := transport.RoundTrip(req)
+		if err != nil {
+			signalStarted(err)
+			onError(err)
+			return
+		}
+		defer resp.Body.Close()
+
+		signalStarted(nil)
+		_, _ = io.Copy(io.Discard, resp.Body)
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			onError(fmt.Errorf("%s bad status: %s", badStatusPrefix, resp.Status))
+		}
+	}()
+
+	if err := <-started; err != nil {
+		return err
+	}
+
+	return nil
+}
+
 type Client struct {
 	mode                  string
 	cfg                   *Config
@@ -548,7 +441,9 @@ func (c *Client) DialStreamUp() (net.Conn, error) {
 	}
 	conn.reader = downloadReader
 
-	if _, err := openStream(c.ctx, nil, c.cfg, uploadTransport, streamURL, sessionID, pr, true, false, "xhttp stream-up upload"); err != nil {
+	if err := startUploadStream(c.ctx, c.cfg, uploadTransport, streamURL, sessionID, pr, "xhttp stream-up upload", func(err error) {
+		_ = pw.CloseWithError(err)
+	}); err != nil {
 		_ = downloadReader.Close()
 		_ = pr.Close()
 		_ = pw.Close()
@@ -588,7 +483,13 @@ func (c *Client) DialPacketUp() (net.Conn, error) {
 		Path:   downloadCfg.NormalizedPath(),
 	}
 
-	writer := newPacketUpWriter(c.ctx, c.cfg, sessionID, uploadTransport)
+	writer := &PacketUpWriter{
+		ctx:       c.ctx,
+		cfg:       c.cfg,
+		sessionID: sessionID,
+		transport: uploadTransport,
+		seq:       0,
+	}
 	conn := &Conn{writer: writer}
 
 	resp, err := openStream(c.ctx, &conn.NetAddr, downloadCfg, downloadTransport, downloadURL, sessionID, nil, false, false, "xhttp packet-up download")

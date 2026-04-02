@@ -1,11 +1,8 @@
 package xhttp
 
 import (
-	"bytes"
-	"context"
 	"io"
 	"net"
-	"sync"
 	"testing"
 	"time"
 
@@ -142,51 +139,49 @@ func TestDialStreamUpDoesNotWaitForDownloadResponse(t *testing.T) {
 	}
 }
 
-type recordedPost struct {
-	path string
-	body []byte
-}
-
-type recordingTransport struct {
-	mu    sync.Mutex
-	posts []recordedPost
-}
-
-func (t *recordingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if trace := httptrace.ContextClientTrace(req.Context()); trace != nil {
-		if trace.GotConn != nil {
-			trace.GotConn(httptrace.GotConnInfo{Conn: &testConn{}})
-		}
-		if trace.WroteRequest != nil {
-			trace.WroteRequest(httptrace.WroteRequestInfo{})
-		}
+func TestDialStreamUpPropagatesAsyncUploadError(t *testing.T) {
+	cfg := &Config{
+		Host: "upload.example.com",
+		Path: "/xhttp",
+		Mode: "stream-up",
+		DownloadConfig: &Config{
+			Host: "download.example.com",
+			Path: "/xhttp",
+		},
 	}
 
-	body, err := io.ReadAll(req.Body)
-	if err != nil {
-		return nil, err
+	uploadTransport := &signalingTransport{respondUpload: false}
+	downloadTransport := &signalingTransport{respondDownload: true}
+	client, err := NewClient(
+		cfg,
+		func() http.RoundTripper { return uploadTransport },
+		func() http.RoundTripper { return downloadTransport },
+		false,
+	)
+	require.NoError(t, err)
+	defer client.Close()
+
+	conn, err := client.DialStreamUp()
+	require.NoError(t, err)
+	defer conn.Close()
+
+	type result struct {
+		n   int
+		err error
 	}
+	resultCh := make(chan result, 1)
+	go func() {
+		n, err := conn.Write([]byte("abc"))
+		resultCh <- result{n: n, err: err}
+	}()
 
-	t.mu.Lock()
-	t.posts = append(t.posts, recordedPost{path: req.URL.Path, body: body})
-	t.mu.Unlock()
-
-	return &http.Response{
-		StatusCode: http.StatusOK,
-		Status:     "200 OK",
-		Body:       io.NopCloser(bytes.NewReader(nil)),
-		Header:     make(http.Header),
-		Request:    req,
-	}, nil
-}
-
-func (t *recordingTransport) Posts() []recordedPost {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	posts := make([]recordedPost, len(t.posts))
-	copy(posts, t.posts)
-	return posts
+	select {
+	case res := <-resultCh:
+		require.Error(t, res.err)
+		require.Zero(t, res.n)
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream-up write did not observe asynchronous upload failure")
+	}
 }
 
 func TestDialPacketUpDoesNotWaitForDownloadResponse(t *testing.T) {
@@ -227,23 +222,4 @@ func TestDialPacketUpDoesNotWaitForDownloadResponse(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("DialPacketUp waited for the download response")
 	}
-}
-
-func TestPacketUpWriterSplitsUploadAtDefaultMaxPostBytes(t *testing.T) {
-	cfg := &Config{Host: "upload.example.com", Path: "/xhttp", Mode: "packet-up"}
-	transport := &recordingTransport{}
-	writer := newPacketUpWriter(context.Background(), cfg, "session", transport)
-
-	payload := bytes.Repeat([]byte{'a'}, xhttpPacketUpMaxEachPostBytes+1)
-	n, err := writer.Write(payload)
-	require.NoError(t, err)
-	require.Equal(t, len(payload), n)
-	require.NoError(t, writer.Close())
-
-	posts := transport.Posts()
-	require.Len(t, posts, 2)
-	require.Equal(t, "/xhttp/session/0", posts[0].path)
-	require.Len(t, posts[0].body, xhttpPacketUpMaxEachPostBytes)
-	require.Equal(t, "/xhttp/session/1", posts[1].path)
-	require.Len(t, posts[1].body, 1)
 }
