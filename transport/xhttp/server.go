@@ -102,6 +102,8 @@ type requestHandler struct {
 	connHandler func(net.Conn)
 	httpHandler http.Handler
 
+	sessionReapTimeout time.Duration
+
 	mu       sync.Mutex
 	sessions map[string]*httpSession
 }
@@ -121,12 +123,13 @@ func NewServerHandler(opt ServerOption) http.Handler {
 	// using h2c.NewHandler to ensure we can work in plain http2
 	// and some tls conn is not *tls.Conn (like *reality.Conn)
 	return h2c.NewHandler(&requestHandler{
-		path:        path,
-		host:        opt.Host,
-		mode:        opt.Mode,
-		connHandler: opt.ConnHandler,
-		httpHandler: opt.HttpHandler,
-		sessions:    map[string]*httpSession{},
+		path:               path,
+		host:               opt.Host,
+		mode:               opt.Mode,
+		connHandler:        opt.ConnHandler,
+		httpHandler:        opt.HttpHandler,
+		sessionReapTimeout: 30 * time.Second,
+		sessions:           map[string]*httpSession{},
 	}, &http.Http2Server{
 		IdleTimeout: 30 * time.Second,
 	})
@@ -134,16 +137,53 @@ func NewServerHandler(opt ServerOption) http.Handler {
 
 func (h *requestHandler) getOrCreateSession(sessionID string) *httpSession {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	s, ok := h.sessions[sessionID]
 	if ok {
+		h.mu.Unlock()
 		return s
 	}
 
 	s = newHTTPSession()
 	h.sessions[sessionID] = s
+	reapTimeout := h.sessionReapTimeout
+	h.mu.Unlock()
+
+	h.scheduleSessionReap(sessionID, s, reapTimeout)
 	return s
+}
+
+func (h *requestHandler) scheduleSessionReap(sessionID string, session *httpSession, timeout time.Duration) {
+	if timeout <= 0 {
+		return
+	}
+
+	go func() {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+
+		select {
+		case <-session.connected:
+			return
+		case <-timer.C:
+		}
+
+		h.mu.Lock()
+		defer h.mu.Unlock()
+
+		current, ok := h.sessions[sessionID]
+		if !ok || current != session {
+			return
+		}
+
+		select {
+		case <-session.connected:
+			return
+		default:
+		}
+
+		_ = session.uploadQueue.Close()
+		delete(h.sessions, sessionID)
+	}()
 }
 
 func (h *requestHandler) deleteSession(sessionID string) {
@@ -245,11 +285,7 @@ func (h *requestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// stream-up upload: POST /path/{session}
 	if r.Method == http.MethodPost && len(parts) == 1 {
 		sessionID := parts[0]
-		session := h.getSession(sessionID)
-		if session == nil {
-			http.Error(w, "unknown xhttp session", http.StatusBadRequest)
-			return
-		}
+		session := h.getOrCreateSession(sessionID)
 
 		buf := make([]byte, 32*1024)
 		var seq uint64

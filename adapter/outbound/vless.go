@@ -107,6 +107,14 @@ type XHTTPDownloadSettings struct {
 	ClientFingerprint *string         `proxy:"client-fingerprint,omitempty"`
 }
 
+func parseXHTTPDownloadRealityConfig(ds *XHTTPDownloadSettings) (*tlsC.RealityConfig, error) {
+	if ds == nil || ds.RealityOpts == nil {
+		return nil, nil
+	}
+
+	return ds.RealityOpts.Parse()
+}
+
 func (v *Vless) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.Metadata) (_ net.Conn, err error) {
 	switch v.option.Network {
 	case "ws":
@@ -544,12 +552,9 @@ func NewVless(option VlessOption) (*Vless, error) {
 					return nil, err
 				}
 			}
-			downloadRealityCfg := v.realityConfig
-			if ds.RealityOpts != nil {
-				downloadRealityCfg, err = ds.RealityOpts.Parse()
-				if err != nil {
-					return nil, err
-				}
+			downloadRealityCfg, err := parseXHTTPDownloadRealityConfig(ds)
+			if err != nil {
+				return nil, err
 			}
 			downloadSkipCertVerify := lo.FromPtrOr(ds.SkipCertVerify, v.option.SkipCertVerify)
 			downloadFingerprint := lo.FromPtrOr(ds.Fingerprint, v.option.Fingerprint)
