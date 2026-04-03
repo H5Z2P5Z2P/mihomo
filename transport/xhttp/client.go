@@ -248,20 +248,27 @@ func (c *Client) dialStreamUpOnce(
 	}
 	downloadReq.Host = downloadCfg.Host
 
-	downloadResp, err := downloadTransport.RoundTrip(downloadReq)
-	if err != nil {
-		if onClose != nil {
-			onClose()
+	dr := newWaitReader()
+	go func() {
+		downloadResp, err := downloadTransport.RoundTrip(downloadReq)
+		if err != nil {
+			dr.CloseWithError(err)
+			if onClose != nil {
+				onClose()
+			}
+			return
 		}
-		return nil, err
-	}
-	if downloadResp.StatusCode != http.StatusOK {
-		_ = downloadResp.Body.Close()
-		if onClose != nil {
-			onClose()
+		if downloadResp.StatusCode != http.StatusOK {
+			_ = downloadResp.Body.Close()
+			dr.CloseWithError(fmt.Errorf("xhttp stream-up download bad status: %s", downloadResp.Status))
+			if onClose != nil {
+				onClose()
+			}
+			return
 		}
-		return nil, fmt.Errorf("xhttp stream-up download bad status: %s", downloadResp.Status)
-	}
+
+		dr.Set(downloadResp.Body)
+	}()
 
 	uploadReq, err := http.NewRequestWithContext(
 		c.ctx,
@@ -270,7 +277,6 @@ func (c *Client) dialStreamUpOnce(
 		pr,
 	)
 	if err != nil {
-		_ = downloadResp.Body.Close()
 		_ = pr.Close()
 		_ = pw.Close()
 		if onClose != nil {
@@ -280,7 +286,6 @@ func (c *Client) dialStreamUpOnce(
 	}
 
 	if err := c.cfg.FillStreamRequest(uploadReq, sessionID); err != nil {
-		_ = downloadResp.Body.Close()
 		_ = pr.Close()
 		_ = pw.Close()
 		if onClose != nil {
@@ -304,7 +309,7 @@ func (c *Client) dialStreamUpOnce(
 		}
 	}()
 
-	conn.reader = downloadResp.Body
+	conn.reader = dr
 	conn.onClose = func() {
 		_ = pr.Close()
 		if onClose != nil {
@@ -332,11 +337,6 @@ func (c *Client) DialStreamUp() (net.Conn, error) {
 	}
 
 	entry, err := c.xmux.getOrCreate(c.makeTransport, c.makeDownloadTransport)
-	if err != nil {
-		return nil, err
-	}
-
-	entry, err = c.xmux.getOrCreate(c.makeTransport, c.makeDownloadTransport)
 	if err != nil {
 		return nil, err
 	}
@@ -445,11 +445,6 @@ func (c *Client) DialPacketUp() (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	entry, err = c.xmux.getOrCreate(c.makeTransport, c.makeDownloadTransport)
-	if err != nil {
-		return nil, err
-	}
 	if entry == nil {
 		return nil, fmt.Errorf("xhttp xmux: no entry available")
 	}
@@ -469,4 +464,63 @@ func newSessionID() string {
 	var b [16]byte
 	_, _ = rand.Read(b[:])
 	return hex.EncodeToString(b[:])
+}
+
+type waitReader struct {
+	ready  chan struct{}
+	reader io.ReadCloser
+	err    error
+	mu     sync.Mutex
+}
+
+func newWaitReader() *waitReader {
+	return &waitReader{
+		ready: make(chan struct{}),
+	}
+}
+
+func (w *waitReader) Set(r io.ReadCloser) {
+	w.mu.Lock()
+	if w.err == nil && w.reader == nil {
+		w.reader = r
+		close(w.ready)
+	} else if r != nil {
+		_ = r.Close()
+	}
+	w.mu.Unlock()
+}
+
+func (w *waitReader) CloseWithError(err error) {
+	w.mu.Lock()
+	if w.err == nil && w.reader == nil {
+		w.err = err
+		close(w.ready)
+	}
+	w.mu.Unlock()
+}
+
+func (w *waitReader) Read(p []byte) (n int, err error) {
+	<-w.ready
+	if w.err != nil {
+		return 0, w.err
+	}
+	if w.reader != nil {
+		return w.reader.Read(p)
+	}
+	return 0, io.EOF
+}
+
+func (w *waitReader) Close() error {
+	w.mu.Lock()
+	if w.err == nil && w.reader == nil {
+		w.err = io.ErrClosedPipe
+		close(w.ready)
+	}
+	w.mu.Unlock()
+
+	<-w.ready
+	if w.reader != nil {
+		return w.reader.Close()
+	}
+	return nil
 }
