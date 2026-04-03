@@ -537,14 +537,14 @@ func NewVless(option VlessOption) (*Vless, error) {
 			downloadPort := lo.FromPtrOr(ds.Port, v.option.Port)
 			downloadTLS := lo.FromPtrOr(ds.TLS, v.option.TLS)
 			downloadALPN := lo.FromPtrOr(ds.ALPN, v.option.ALPN)
-			downloadEchConfig := v.echConfig
+			var downloadEchConfig *ech.Config // 下行不继承上行的 ECH 配置
 			if ds.ECHOpts != nil {
 				downloadEchConfig, err = ds.ECHOpts.Parse()
 				if err != nil {
 					return nil, err
 				}
 			}
-			downloadRealityCfg := v.realityConfig
+			var downloadRealityCfg *tlsC.RealityConfig // 下行不继承上行的 Reality 配置
 			if ds.RealityOpts != nil {
 				downloadRealityCfg, err = ds.RealityOpts.Parse()
 				if err != nil {
