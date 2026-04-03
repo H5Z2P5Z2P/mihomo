@@ -3,6 +3,7 @@ package xhttp
 import (
 	"errors"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/metacubex/mihomo/common/httputils"
@@ -16,9 +17,16 @@ type Conn struct {
 
 	// deadlines
 	deadline *time.Timer
+
+	// 延迟异步请求支持
+	onFirstWrite func()
+	onceWrite    sync.Once
 }
 
 func (c *Conn) Write(b []byte) (int, error) {
+	if c.onFirstWrite != nil {
+		c.onceWrite.Do(c.onFirstWrite)
+	}
 	return c.writer.Write(b)
 }
 

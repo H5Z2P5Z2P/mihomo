@@ -11,8 +11,7 @@ import (
 )
 
 type xmuxEntry struct {
-	uploadTransport   http.RoundTripper
-	downloadTransport http.RoundTripper
+	transport http.RoundTripper
 
 	openUsage     atomic.Int32
 	leftRequests  atomic.Int32
@@ -31,20 +30,37 @@ func (e *xmuxEntry) Close() {
 	if !e.closed.CompareAndSwap(false, true) {
 		return
 	}
-	httputils.CloseTransport(e.uploadTransport)
-	if e.downloadTransport != e.uploadTransport {
-		httputils.CloseTransport(e.downloadTransport)
-	}
+	httputils.CloseTransport(e.transport)
 }
 
+type XMuxProvider interface {
+	GetMaxConnections() string
+	GetMaxConcurrency() string
+	GetCMaxReuseTimes() string
+	GetHMaxRequestTimes() string
+	GetHMaxReusableSecs() string
+}
+
+func (c *XMuxConfig) GetMaxConnections() string   { return c.MaxConnections }
+func (c *XMuxConfig) GetMaxConcurrency() string   { return c.MaxConcurrency }
+func (c *XMuxConfig) GetCMaxReuseTimes() string   { return c.CMaxReuseTimes }
+func (c *XMuxConfig) GetHMaxRequestTimes() string { return c.HMaxRequestTimes }
+func (c *XMuxConfig) GetHMaxReusableSecs() string { return c.HMaxReusableSecs }
+
+func (c *XMuxDownloadConfig) GetMaxConnections() string   { return c.MaxConnections }
+func (c *XMuxDownloadConfig) GetMaxConcurrency() string   { return c.MaxConcurrency }
+func (c *XMuxDownloadConfig) GetCMaxReuseTimes() string   { return c.CMaxReuseTimes }
+func (c *XMuxDownloadConfig) GetHMaxRequestTimes() string { return c.HMaxRequestTimes }
+func (c *XMuxDownloadConfig) GetHMaxReusableSecs() string { return c.HMaxReusableSecs }
+
 type xmuxManager struct {
-	cfg *XMuxConfig
+	cfg XMuxProvider
 
 	mu      sync.Mutex
 	entries []*xmuxEntry
 }
 
-func newXMuxManager(cfg *XMuxConfig) *xmuxManager {
+func newXMuxManager(cfg XMuxProvider) *xmuxManager {
 	if cfg == nil {
 		return nil
 	}
@@ -106,26 +122,28 @@ func (m *xmuxManager) release(entry *xmuxEntry) {
 	}
 }
 
-func (m *xmuxManager) resolvedMaxConcurrency() int {
+func (m *xmuxManager) getResolvedConfigs() (int, int, int, int, int) {
 	if m.cfg == nil {
-		return 0
+		return 0, 0, 0, 0, 0
 	}
-	v, err := resolveRangeValue(m.cfg.MaxConcurrency, 0)
-	if err != nil {
-		return 0
-	}
-	return v
+
+	maxConnections, _ := resolveRangeValue(m.cfg.GetMaxConnections(), 0)
+	maxConcurrency, _ := resolveRangeValue(m.cfg.GetMaxConcurrency(), 0)
+	cMaxReuseTimes, _ := resolveRangeValue(m.cfg.GetCMaxReuseTimes(), 0)
+	hMaxRequestTimes, _ := resolveRangeValue(m.cfg.GetHMaxRequestTimes(), 0)
+	hMaxReusableSecs, _ := resolveRangeValue(m.cfg.GetHMaxReusableSecs(), 0)
+
+	return maxConnections, maxConcurrency, cMaxReuseTimes, hMaxRequestTimes, hMaxReusableSecs
+}
+
+func (m *xmuxManager) resolvedMaxConcurrency() int {
+	_, maxConcurrency, _, _, _ := m.getResolvedConfigs()
+	return maxConcurrency
 }
 
 func (m *xmuxManager) resolvedMaxConnections() int {
-	if m.cfg == nil {
-		return 0
-	}
-	v, err := resolveRangeValue(m.cfg.MaxConnections, 0)
-	if err != nil {
-		return 0
-	}
-	return v
+	maxConnections, _, _, _, _ := m.getResolvedConfigs()
+	return maxConnections
 }
 
 func (m *xmuxManager) pickLocked() *xmuxEntry {
@@ -162,41 +180,27 @@ func (m *xmuxManager) canCreateLocked() bool {
 
 func (m *xmuxManager) newEntryLocked(
 	makeTransport TransportMaker,
-	makeDownloadTransport TransportMaker,
 	now time.Time,
 ) *xmuxEntry {
-	uploadTransport := makeTransport()
-	downloadTransport := uploadTransport
-	if makeDownloadTransport != nil {
-		downloadTransport = makeDownloadTransport()
-	}
+	transport := makeTransport()
 
 	entry := &xmuxEntry{
-		uploadTransport:   uploadTransport,
-		downloadTransport: downloadTransport,
+		transport: transport,
 	}
 
-	if m.cfg != nil {
-		hMaxRequestTimes, hMaxReusableSecs, err := m.cfg.ResolveEntryConfig()
-		if err == nil {
-			if hMaxRequestTimes > 0 {
-				entry.leftRequests.Store(int32(hMaxRequestTimes))
-			} else {
-				entry.leftRequests.Store(1<<30 - 1)
-			}
-			if hMaxReusableSecs > 0 {
-				entry.unreusableAt = now.Add(time.Duration(hMaxReusableSecs) * time.Second)
-			}
-		} else {
-			entry.leftRequests.Store(1<<30 - 1)
-		}
+	_, _, cMaxReuseTimes, hMaxRequestTimes, hMaxReusableSecs := m.getResolvedConfigs()
 
-		cMaxReuseTimes, err := m.cfg.ResolveConnReuseConfig()
-		if err == nil && cMaxReuseTimes > 0 {
-			entry.maxReuseTimes = int32(cMaxReuseTimes)
-		}
+	if hMaxRequestTimes > 0 {
+		entry.leftRequests.Store(int32(hMaxRequestTimes))
 	} else {
 		entry.leftRequests.Store(1<<30 - 1)
+	}
+	if hMaxReusableSecs > 0 {
+		entry.unreusableAt = now.Add(time.Duration(hMaxReusableSecs) * time.Second)
+	}
+
+	if cMaxReuseTimes > 0 {
+		entry.maxReuseTimes = int32(cMaxReuseTimes)
 	}
 
 	m.entries = append(m.entries, entry)
@@ -205,7 +209,6 @@ func (m *xmuxManager) newEntryLocked(
 
 func (m *xmuxManager) getOrCreate(
 	makeTransport TransportMaker,
-	makeDownloadTransport TransportMaker,
 ) (*xmuxEntry, error) {
 	now := time.Now()
 
@@ -221,7 +224,7 @@ func (m *xmuxManager) getOrCreate(
 		if !m.canCreateLocked() {
 			return nil, fmt.Errorf("xmux: no available connection")
 		}
-		entry = m.newEntryLocked(makeTransport, makeDownloadTransport, now)
+		entry = m.newEntryLocked(makeTransport, now)
 	}
 
 	if reused {

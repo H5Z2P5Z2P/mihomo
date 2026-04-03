@@ -104,7 +104,10 @@ type Client struct {
 	makeDownloadTransport TransportMaker
 	ctx                   context.Context
 	cancel                context.CancelFunc
-	xmux                  *xmuxManager
+
+	// 上下行独立池化
+	uploadXMux   *xmuxManager
+	downloadXMux *xmuxManager
 }
 
 func NewClient(cfg *Config, makeTransport TransportMaker, makeDownloadTransport TransportMaker, hasReality bool) (*Client, error) {
@@ -124,8 +127,16 @@ func NewClient(cfg *Config, makeTransport TransportMaker, makeDownloadTransport 
 		ctx:                   ctx,
 		cancel:                cancel,
 	}
+
+	// 初始化上行池
 	if cfg.XMux != nil {
-		client.xmux = newXMuxManager(cfg.XMux)
+		client.uploadXMux = newXMuxManager(cfg.XMux)
+		// 初始化下行池（独立配置或复用主配置）
+		if cfg.XMux.Download != nil {
+			client.downloadXMux = newXMuxManager(cfg.XMux.Download)
+		} else {
+			client.downloadXMux = newXMuxManager(cfg.XMux) // 默认复用同样的复用策略，但物理隔离
+		}
 	}
 	return client, nil
 }
@@ -145,8 +156,11 @@ func (c *Client) Dial() (net.Conn, error) {
 
 func (c *Client) Close() error {
 	c.cancel()
-	if c.xmux != nil {
-		c.xmux.Close()
+	if c.uploadXMux != nil {
+		c.uploadXMux.Close()
+	}
+	if c.downloadXMux != nil {
+		c.downloadXMux.Close()
 	}
 	return nil
 }
@@ -253,17 +267,11 @@ func (c *Client) dialStreamUpOnce(
 		downloadResp, err := downloadTransport.RoundTrip(downloadReq)
 		if err != nil {
 			dr.CloseWithError(err)
-			if onClose != nil {
-				onClose()
-			}
 			return
 		}
 		if downloadResp.StatusCode != http.StatusOK {
 			_ = downloadResp.Body.Close()
 			dr.CloseWithError(fmt.Errorf("xhttp stream-up download bad status: %s", downloadResp.Status))
-			if onClose != nil {
-				onClose()
-			}
 			return
 		}
 
@@ -295,23 +303,28 @@ func (c *Client) dialStreamUpOnce(
 	}
 	uploadReq.Host = c.cfg.Host
 
-	go func() {
-		resp, err := uploadTransport.RoundTrip(uploadReq)
-		if err != nil {
-			_ = pw.CloseWithError(err)
-			return
-		}
-		defer resp.Body.Close()
-		_, _ = io.Copy(io.Discard, resp.Body)
+	// 延续延迟启动上行逻辑
+	conn.onFirstWrite = func() {
+		go func() {
+			resp, err := uploadTransport.RoundTrip(uploadReq)
+			if err != nil {
+				_ = pw.CloseWithError(err)
+				dr.CloseWithError(err)
+				return
+			}
+			defer resp.Body.Close()
+			_, _ = io.Copy(io.Discard, resp.Body)
 
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			_ = pw.CloseWithError(fmt.Errorf("xhttp stream-up upload bad status: %s", resp.Status))
-		}
-	}()
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				_ = pw.CloseWithError(fmt.Errorf("xhttp stream-up upload bad status: %s", resp.Status))
+			}
+		}()
+	}
 
 	conn.reader = dr
 	conn.onClose = func() {
 		_ = pr.Close()
+		_ = pw.Close()
 		if onClose != nil {
 			onClose()
 		}
@@ -321,7 +334,7 @@ func (c *Client) dialStreamUpOnce(
 }
 
 func (c *Client) DialStreamUp() (net.Conn, error) {
-	if c.xmux == nil {
+	if c.uploadXMux == nil {
 		uploadTransport := c.makeTransport()
 		downloadTransport := uploadTransport
 		if c.makeDownloadTransport != nil {
@@ -336,19 +349,29 @@ func (c *Client) DialStreamUp() (net.Conn, error) {
 		})
 	}
 
-	entry, err := c.xmux.getOrCreate(c.makeTransport, c.makeDownloadTransport)
+	// 分别从上下行池中分配 Transport
+	uploadEntry, err := c.uploadXMux.getOrCreate(c.makeTransport)
 	if err != nil {
 		return nil, err
 	}
-	if entry == nil {
-		return nil, fmt.Errorf("xhttp xmux: no entry available")
+
+	downloadMaker := c.makeTransport
+	if c.makeDownloadTransport != nil {
+		downloadMaker = c.makeDownloadTransport
+	}
+	downloadEntry, err := c.downloadXMux.getOrCreate(downloadMaker)
+	if err != nil {
+		c.uploadXMux.release(uploadEntry)
+		return nil, err
 	}
 
-	conn, err := c.dialStreamUpOnce(entry.uploadTransport, entry.downloadTransport, func() {
-		c.xmux.release(entry)
+	conn, err := c.dialStreamUpOnce(uploadEntry.transport, downloadEntry.transport, func() {
+		c.uploadXMux.release(uploadEntry)
+		c.downloadXMux.release(downloadEntry)
 	})
 	if err != nil {
-		c.xmux.release(entry)
+		c.uploadXMux.release(uploadEntry)
+		c.downloadXMux.release(downloadEntry)
 		return nil, err
 	}
 
@@ -426,7 +449,7 @@ func (c *Client) dialPacketUpOnce(
 }
 
 func (c *Client) DialPacketUp() (net.Conn, error) {
-	if c.xmux == nil {
+	if c.uploadXMux == nil {
 		uploadTransport := c.makeTransport()
 		downloadTransport := uploadTransport
 		if c.makeDownloadTransport != nil {
@@ -441,19 +464,28 @@ func (c *Client) DialPacketUp() (net.Conn, error) {
 		})
 	}
 
-	entry, err := c.xmux.getOrCreate(c.makeTransport, c.makeDownloadTransport)
+	uploadEntry, err := c.uploadXMux.getOrCreate(c.makeTransport)
 	if err != nil {
 		return nil, err
 	}
-	if entry == nil {
-		return nil, fmt.Errorf("xhttp xmux: no entry available")
+
+	downloadMaker := c.makeTransport
+	if c.makeDownloadTransport != nil {
+		downloadMaker = c.makeDownloadTransport
+	}
+	downloadEntry, err := c.downloadXMux.getOrCreate(downloadMaker)
+	if err != nil {
+		c.uploadXMux.release(uploadEntry)
+		return nil, err
 	}
 
-	conn, err := c.dialPacketUpOnce(entry.uploadTransport, entry.downloadTransport, func() {
-		c.xmux.release(entry)
+	conn, err := c.dialPacketUpOnce(uploadEntry.transport, downloadEntry.transport, func() {
+		c.uploadXMux.release(uploadEntry)
+		c.downloadXMux.release(downloadEntry)
 	})
 	if err != nil {
-		c.xmux.release(entry)
+		c.uploadXMux.release(uploadEntry)
+		c.downloadXMux.release(downloadEntry)
 		return nil, err
 	}
 
