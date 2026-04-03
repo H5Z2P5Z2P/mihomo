@@ -89,10 +89,13 @@ func newHTTPSession() *httpSession {
 	}
 }
 
-func (s *httpSession) markConnected() {
+func (s *httpSession) markConnected() bool {
+	marked := false
 	s.once.Do(func() {
+		marked = true
 		close(s.connected)
 	})
+	return marked
 }
 
 type requestHandler struct {
@@ -145,9 +148,11 @@ func (h *requestHandler) getOrCreateSession(sessionID string) *httpSession {
 
 	s = newHTTPSession()
 	h.sessions[sessionID] = s
+	activeSessions := len(h.sessions)
 	reapTimeout := h.sessionReapTimeout
 	h.mu.Unlock()
 
+	logLifecycle("session created id=%s active=%d", sessionID, activeSessions)
 	h.scheduleSessionReap(sessionID, s, reapTimeout)
 	return s
 }
@@ -168,31 +173,42 @@ func (h *requestHandler) scheduleSessionReap(sessionID string, session *httpSess
 		}
 
 		h.mu.Lock()
-		defer h.mu.Unlock()
-
 		current, ok := h.sessions[sessionID]
 		if !ok || current != session {
+			h.mu.Unlock()
 			return
 		}
 
 		select {
 		case <-session.connected:
+			h.mu.Unlock()
 			return
 		default:
 		}
 
 		_ = session.uploadQueue.Close()
 		delete(h.sessions, sessionID)
+		activeSessions := len(h.sessions)
+		h.mu.Unlock()
+		logLifecycle("session reaped id=%s active=%d", sessionID, activeSessions)
 	}()
 }
 
 func (h *requestHandler) deleteSession(sessionID string) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	deleted := false
+	activeSessions := 0
 
 	if s, ok := h.sessions[sessionID]; ok {
 		_ = s.uploadQueue.Close()
 		delete(h.sessions, sessionID)
+		deleted = true
+		activeSessions = len(h.sessions)
+	}
+	h.mu.Unlock()
+
+	if deleted {
+		logLifecycle("session deleted id=%s active=%d", sessionID, activeSessions)
 	}
 }
 
@@ -252,7 +268,10 @@ func (h *requestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet && len(parts) == 1 {
 		sessionID := parts[0]
 		session := h.getOrCreateSession(sessionID)
-		session.markConnected()
+		if session.markConnected() {
+			logLifecycle("session connected id=%s", sessionID)
+		}
+		logLifecycle("download stream opened session=%s remote=%s", sessionID, r.RemoteAddr)
 
 		w.Header().Set("X-Accel-Buffering", "no")
 		w.Header().Set("Cache-Control", "no-store")
@@ -280,6 +299,7 @@ func (h *requestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		_ = conn.Close()
+		logLifecycle("download stream closed session=%s remote=%s ctxErr=%v", sessionID, r.RemoteAddr, r.Context().Err())
 		return
 	}
 
@@ -287,34 +307,30 @@ func (h *requestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost && len(parts) == 1 {
 		sessionID := parts[0]
 		session := h.getOrCreateSession(sessionID)
+		logLifecycle("stream-up upload opened session=%s remote=%s", sessionID, r.RemoteAddr)
 
-		buf := make([]byte, 32*1024)
-		var seq uint64
-
-		for {
-			n, err := r.Body.Read(buf)
-			if n > 0 {
-				if pushErr := session.uploadQueue.Push(Packet{
-					Seq:     seq,
-					Payload: buf[:n],
-				}); pushErr != nil {
-					http.Error(w, pushErr.Error(), http.StatusInternalServerError)
-					return
-				}
-				seq++
-			}
-
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
+		httpSC := newHTTPServerConn(w, r.Body)
+		if err := session.uploadQueue.Push(Packet{Reader: httpSC}); err != nil {
+			logLifecycle("stream-up upload push failed session=%s err=%v", sessionID, err)
+			http.Error(w, err.Error(), http.StatusConflict)
+			_ = httpSC.Close()
+			return
 		}
 
+		w.Header().Set("X-Accel-Buffering", "no")
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+
+		select {
+		case <-r.Context().Done():
+		case <-httpSC.Wait():
+		}
+
+		_ = httpSC.Close()
+		logLifecycle("stream-up upload closed session=%s remote=%s ctxErr=%v", sessionID, r.RemoteAddr, r.Context().Err())
 		return
 	}
 

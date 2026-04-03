@@ -1,10 +1,23 @@
 package xhttp
 
 import (
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestUploadQueueReadsFromStreamReader(t *testing.T) {
+	q := NewUploadQueue(0)
+	require.NoError(t, q.Push(Packet{Reader: io.NopCloser(strings.NewReader("abc"))}))
+
+	buf := make([]byte, 3)
+	n, err := q.Read(buf)
+	require.NoError(t, err)
+	require.Equal(t, 3, n)
+	require.Equal(t, "abc", string(buf[:n]))
+}
 
 func TestUploadQueueErrorsWhenMisorderedBufferExceedsLimit(t *testing.T) {
 	q := NewUploadQueue(2)

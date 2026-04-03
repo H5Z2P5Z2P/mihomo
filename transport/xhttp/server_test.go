@@ -1,6 +1,7 @@
 package xhttp
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -41,13 +42,31 @@ func TestRequestHandlerKeepsConnectedSession(t *testing.T) {
 func TestRequestHandlerCreatesSessionForStreamUpUpload(t *testing.T) {
 	h := newTestRequestHandler()
 
-	req := httptest.NewRequest(http.MethodPost, "http://example.com/xhttp/session", strings.NewReader("abc"))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/xhttp/session", strings.NewReader("abc")).WithContext(ctx)
 	w := httptest.NewRecorder()
+	done := make(chan struct{})
 
-	h.ServeHTTP(w, req)
+	go func() {
+		h.ServeHTTP(w, req)
+		close(done)
+	}()
 
-	require.Equal(t, http.StatusOK, w.Code)
-	require.NotNil(t, h.getSession("session"))
+	require.Eventually(t, func() bool {
+		return w.Code == http.StatusOK && h.getSession("session") != nil
+	}, time.Second, 10*time.Millisecond)
+
+	cancel()
+	require.Eventually(t, func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
 }
 
 func TestRequestHandlerCreatesSessionForPacketUpUpload(t *testing.T) {

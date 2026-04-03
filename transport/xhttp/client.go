@@ -49,6 +49,7 @@ func newPacketUpWriter(ctx context.Context, cfg *Config, sessionID string, trans
 		done:      make(chan struct{}),
 	}
 	w.cond = sync.NewCond(&w.mu)
+	logLifecycle("packet-up writer created session=%s", sessionID)
 	go w.run()
 	return w
 }
@@ -98,6 +99,13 @@ func (c *PacketUpWriter) Write(b []byte) (int, error) {
 func (c *PacketUpWriter) run() {
 	defer close(c.done)
 	defer httputils.CloseTransport(c.transport)
+	defer func() {
+		c.mu.Lock()
+		closed := c.closed
+		err := c.err
+		c.mu.Unlock()
+		logLifecycle("packet-up writer exited session=%s closed=%t err=%v", c.sessionID, closed, err)
+	}()
 
 	var lastPost time.Time
 	for {
@@ -211,16 +219,23 @@ func (c *PacketUpWriter) setErr(err error) {
 		err = io.ErrClosedPipe
 	}
 
+	shouldLog := false
 	c.mu.Lock()
 	if c.err == nil {
 		c.err = err
+		shouldLog = true
 	}
 	c.closed = true
 	c.cond.Broadcast()
 	c.mu.Unlock()
+
+	if shouldLog {
+		logLifecycle("packet-up writer error session=%s err=%v", c.sessionID, err)
+	}
 }
 
 func (c *PacketUpWriter) Close() error {
+	logLifecycle("packet-up writer close requested session=%s", c.sessionID)
 	c.mu.Lock()
 	c.closed = true
 	c.cond.Broadcast()
@@ -378,34 +393,41 @@ func openStream(ctx context.Context, addr *httputils.NetAddr, cfg *Config, trans
 	}
 
 	reader := newWaitReadCloser()
+	logLifecycle("%s start session=%s method=%s url=%s uploadOnly=%t waitForRequestWrite=%t", badStatusPrefix, sessionID, method, req.URL.String(), uploadOnly, waitForRequestWrite)
 
 	go func() {
 		resp, err := transport.RoundTrip(req)
 		if err != nil {
+			logLifecycle("%s roundtrip failed session=%s err=%v", badStatusPrefix, sessionID, err)
 			signalStarted(err)
 			reader.Fail(err)
 			return
 		}
 
 		signalStarted(nil)
+		logLifecycle("%s response received session=%s status=%s", badStatusPrefix, sessionID, resp.Status)
 
 		if uploadOnly {
 			_, _ = io.Copy(io.Discard, resp.Body)
 			_ = resp.Body.Close()
 			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				logLifecycle("%s response rejected session=%s status=%s", badStatusPrefix, sessionID, resp.Status)
 				reader.Fail(fmt.Errorf("%s bad status: %s", badStatusPrefix, resp.Status))
 				return
 			}
+			logLifecycle("%s upload-only stream drained session=%s", badStatusPrefix, sessionID)
 			reader.Fail(io.ErrClosedPipe)
 			return
 		}
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			_ = resp.Body.Close()
+			logLifecycle("%s response rejected session=%s status=%s", badStatusPrefix, sessionID, resp.Status)
 			reader.Fail(fmt.Errorf("%s bad status: %s", badStatusPrefix, resp.Status))
 			return
 		}
 
+		logLifecycle("%s response ready session=%s", badStatusPrefix, sessionID)
 		reader.Set(resp.Body)
 	}()
 
@@ -439,10 +461,19 @@ func startUploadStream(ctx context.Context, cfg *Config, transport http.RoundTri
 		return err
 	}
 	req.Host = cfg.Host
+	logLifecycle("%s start session=%s method=%s url=%s", badStatusPrefix, sessionID, req.Method, req.URL.String())
 
+	activeUploads := addActiveStreamUpUploads(1)
+	logLifecycle("%s upload goroutine started session=%s activeUploads=%d", badStatusPrefix, sessionID, activeUploads)
 	go func() {
+		defer func() {
+			activeUploads := addActiveStreamUpUploads(-1)
+			logLifecycle("%s upload goroutine exited session=%s activeUploads=%d", badStatusPrefix, sessionID, activeUploads)
+		}()
+
 		resp, err := transport.RoundTrip(req)
 		if err != nil {
+			logLifecycle("%s roundtrip failed session=%s err=%v", badStatusPrefix, sessionID, err)
 			signalStarted(err)
 			onError(err)
 			return
@@ -450,11 +481,21 @@ func startUploadStream(ctx context.Context, cfg *Config, transport http.RoundTri
 		defer resp.Body.Close()
 
 		signalStarted(nil)
-		_, _ = io.Copy(io.Discard, resp.Body)
+		logLifecycle("%s response received session=%s status=%s", badStatusPrefix, sessionID, resp.Status)
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			logLifecycle("%s response rejected session=%s status=%s", badStatusPrefix, sessionID, resp.Status)
 			onError(fmt.Errorf("%s bad status: %s", badStatusPrefix, resp.Status))
+			return
 		}
+
+		if _, err := io.Copy(io.Discard, resp.Body); err != nil && ctx.Err() == nil {
+			logLifecycle("%s response stream failed session=%s err=%v", badStatusPrefix, sessionID, err)
+			onError(err)
+			return
+		}
+		logLifecycle("%s completed session=%s", badStatusPrefix, sessionID)
 	}()
 
 	if err := <-started; err != nil {
@@ -511,6 +552,7 @@ func (c *Client) Close() error {
 
 func (c *Client) DialStreamOne() (net.Conn, error) {
 	transport := c.makeTransport()
+	connCtx, connCancel := context.WithCancel(c.ctx)
 
 	requestURL := url.URL{
 		Scheme: "https",
@@ -521,8 +563,9 @@ func (c *Client) DialStreamOne() (net.Conn, error) {
 
 	conn := &Conn{writer: pw}
 
-	req, err := http.NewRequestWithContext(httputils.NewAddrContext(&conn.NetAddr, c.ctx), http.MethodPost, requestURL.String(), pr)
+	req, err := http.NewRequestWithContext(httputils.NewAddrContext(&conn.NetAddr, connCtx), http.MethodPost, requestURL.String(), pr)
 	if err != nil {
+		connCancel()
 		_ = pr.Close()
 		_ = pw.Close()
 		return nil, err
@@ -530,6 +573,7 @@ func (c *Client) DialStreamOne() (net.Conn, error) {
 	req.Host = c.cfg.Host
 
 	if err := c.cfg.FillStreamRequest(req, ""); err != nil {
+		connCancel()
 		_ = pr.Close()
 		_ = pw.Close()
 		return nil, err
@@ -537,12 +581,14 @@ func (c *Client) DialStreamOne() (net.Conn, error) {
 
 	resp, err := transport.RoundTrip(req)
 	if err != nil {
+		connCancel()
 		_ = pr.Close()
 		_ = pw.Close()
 		httputils.CloseTransport(transport)
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		connCancel()
 		_ = resp.Body.Close()
 		_ = pr.Close()
 		_ = pw.Close()
@@ -551,6 +597,7 @@ func (c *Client) DialStreamOne() (net.Conn, error) {
 	}
 	conn.reader = resp.Body
 	conn.onClose = func() {
+		connCancel()
 		_ = pr.Close()
 		httputils.CloseTransport(transport)
 	}
@@ -564,6 +611,7 @@ func (c *Client) DialStreamUp() (net.Conn, error) {
 	if c.makeDownloadTransport != nil {
 		downloadTransport = c.makeDownloadTransport()
 	}
+	connCtx, connCancel := context.WithCancel(c.ctx)
 
 	downloadCfg := c.cfg
 	if ds := c.cfg.DownloadConfig; ds != nil {
@@ -586,9 +634,14 @@ func (c *Client) DialStreamUp() (net.Conn, error) {
 	conn := &Conn{writer: pw}
 
 	sessionID := newSessionID()
+	activeConns := addActiveConn("stream-up", 1)
+	logLifecycle("dial stream-up session=%s uploadHost=%s downloadHost=%s active=%d", sessionID, c.cfg.Host, downloadCfg.Host, activeConns)
 
-	downloadReader, err := openStream(c.ctx, &conn.NetAddr, downloadCfg, downloadTransport, downloadURL, sessionID, nil, false, true, "xhttp stream-up download")
+	downloadReader, err := openStream(connCtx, &conn.NetAddr, downloadCfg, downloadTransport, downloadURL, sessionID, nil, false, true, "xhttp stream-up download")
 	if err != nil {
+		connCancel()
+		activeConns = addActiveConn("stream-up", -1)
+		logLifecycle("dial stream-up failed session=%s active=%d err=%v", sessionID, activeConns, err)
 		httputils.CloseTransport(uploadTransport)
 		if downloadTransport != uploadTransport {
 			httputils.CloseTransport(downloadTransport)
@@ -597,9 +650,12 @@ func (c *Client) DialStreamUp() (net.Conn, error) {
 	}
 	conn.reader = downloadReader
 
-	if err := startUploadStream(c.ctx, c.cfg, uploadTransport, streamURL, sessionID, pr, "xhttp stream-up upload", func(err error) {
+	if err := startUploadStream(connCtx, c.cfg, uploadTransport, streamURL, sessionID, pr, "xhttp stream-up upload", func(err error) {
 		_ = pw.CloseWithError(err)
 	}); err != nil {
+		connCancel()
+		activeConns = addActiveConn("stream-up", -1)
+		logLifecycle("stream-up upload setup failed session=%s active=%d err=%v", sessionID, activeConns, err)
 		_ = downloadReader.Close()
 		_ = pr.Close()
 		_ = pw.Close()
@@ -610,11 +666,14 @@ func (c *Client) DialStreamUp() (net.Conn, error) {
 		return nil, err
 	}
 	conn.onClose = func() {
+		connCancel()
 		_ = pr.Close()
 		httputils.CloseTransport(uploadTransport)
 		if downloadTransport != uploadTransport {
 			httputils.CloseTransport(downloadTransport)
 		}
+		activeConns := addActiveConn("stream-up", -1)
+		logLifecycle("stream-up conn close session=%s active=%d", sessionID, activeConns)
 	}
 
 	return conn, nil
@@ -626,12 +685,15 @@ func (c *Client) DialPacketUp() (net.Conn, error) {
 	if c.makeDownloadTransport != nil {
 		downloadTransport = c.makeDownloadTransport()
 	}
+	connCtx, connCancel := context.WithCancel(c.ctx)
 
 	downloadCfg := c.cfg
 	if ds := c.cfg.DownloadConfig; ds != nil {
 		downloadCfg = ds
 	}
 	sessionID := newSessionID()
+	activeConns := addActiveConn("packet-up", 1)
+	logLifecycle("dial packet-up session=%s uploadHost=%s downloadHost=%s active=%d", sessionID, c.cfg.Host, downloadCfg.Host, activeConns)
 
 	downloadURL := url.URL{
 		Scheme: "https",
@@ -639,11 +701,14 @@ func (c *Client) DialPacketUp() (net.Conn, error) {
 		Path:   downloadCfg.NormalizedPath(),
 	}
 
-	writer := newPacketUpWriter(c.ctx, c.cfg, sessionID, uploadTransport)
+	writer := newPacketUpWriter(connCtx, c.cfg, sessionID, uploadTransport)
 	conn := &Conn{writer: writer}
 
-	resp, err := openStream(c.ctx, &conn.NetAddr, downloadCfg, downloadTransport, downloadURL, sessionID, nil, false, false, "xhttp packet-up download")
+	resp, err := openStream(connCtx, &conn.NetAddr, downloadCfg, downloadTransport, downloadURL, sessionID, nil, false, false, "xhttp packet-up download")
 	if err != nil {
+		connCancel()
+		activeConns = addActiveConn("packet-up", -1)
+		logLifecycle("dial packet-up failed session=%s active=%d err=%v", sessionID, activeConns, err)
 		_ = writer.Close()
 		if downloadTransport != uploadTransport {
 			httputils.CloseTransport(downloadTransport)
@@ -652,9 +717,12 @@ func (c *Client) DialPacketUp() (net.Conn, error) {
 	}
 	conn.reader = resp
 	conn.onClose = func() {
+		connCancel()
 		if downloadTransport != uploadTransport {
 			httputils.CloseTransport(downloadTransport)
 		}
+		activeConns := addActiveConn("packet-up", -1)
+		logLifecycle("packet-up conn close session=%s active=%d", sessionID, activeConns)
 	}
 
 	return conn, nil

@@ -3,6 +3,7 @@ package xhttp
 import (
 	"errors"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/metacubex/mihomo/common/httputils"
@@ -16,6 +17,9 @@ type Conn struct {
 
 	// deadlines
 	deadline *time.Timer
+
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func (c *Conn) Write(b []byte) (int, error) {
@@ -27,12 +31,26 @@ func (c *Conn) Read(b []byte) (int, error) {
 }
 
 func (c *Conn) Close() error {
-	err := c.writer.Close()
-	err2 := c.reader.Close()
-	if c.onClose != nil {
-		c.onClose()
-	}
-	return errors.Join(err, err2)
+	c.closeOnce.Do(func() {
+		if c.deadline != nil {
+			c.deadline.Stop()
+			c.deadline = nil
+		}
+
+		var errs []error
+		if c.writer != nil {
+			errs = append(errs, c.writer.Close())
+		}
+		if c.reader != nil {
+			errs = append(errs, c.reader.Close())
+		}
+		if c.onClose != nil {
+			c.onClose()
+		}
+		c.closeErr = errors.Join(errs...)
+	})
+
+	return c.closeErr
 }
 
 func (c *Conn) SetReadDeadline(t time.Time) error  { return c.SetDeadline(t) }
