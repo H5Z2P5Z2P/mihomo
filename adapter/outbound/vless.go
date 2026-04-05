@@ -577,6 +577,9 @@ func NewVless(option VlessOption) (*Vless, error) {
 			downloadCertificate := lo.FromPtrOr(ds.Certificate, v.option.Certificate)
 			downloadPrivateKey := lo.FromPtrOr(ds.PrivateKey, v.option.PrivateKey)
 			downloadServerName := lo.FromPtrOr(ds.ServerName, v.option.ServerName)
+			if downloadServerName == "" && ds.Server != nil {
+				downloadServerName = *ds.Server
+			}
 			downloadClientFingerprint := lo.FromPtrOr(ds.ClientFingerprint, v.option.ClientFingerprint)
 
 			downloadAddr := net.JoinHostPort(downloadServer, strconv.Itoa(downloadPort))

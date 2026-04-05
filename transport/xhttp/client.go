@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/metacubex/mihomo/common/httputils"
+	"github.com/metacubex/mihomo/log"
 
 	"github.com/metacubex/http"
 	"github.com/metacubex/tls"
@@ -283,6 +284,42 @@ func (c *Client) DialStreamUp() (net.Conn, error) {
 
 	sessionID := newSessionID()
 
+	uploadReq, err := http.NewRequestWithContext(
+		c.ctx,
+		http.MethodPost,
+		streamURL.String(),
+		pr,
+	)
+	if err != nil {
+		httputils.CloseTransport(uploadTransport)
+		httputils.CloseTransport(downloadTransport)
+		return nil, err
+	}
+
+	if err := c.cfg.FillStreamRequest(uploadReq, sessionID); err != nil {
+		httputils.CloseTransport(uploadTransport)
+		httputils.CloseTransport(downloadTransport)
+		return nil, err
+	}
+	uploadReq.Host = c.cfg.Host
+
+	go func() {
+		resp, err := uploadTransport.RoundTrip(uploadReq)
+		if err != nil {
+			log.Errorln("xhttp stream-up upload RoundTrip error: %s", err)
+			_ = pw.CloseWithError(err)
+			return
+		}
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, resp.Body)
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			err := fmt.Errorf("xhttp stream-up upload bad status: %s", resp.Status)
+			log.Errorln("xhttp stream-up upload: %s", err)
+			_ = pw.CloseWithError(err)
+		}
+	}()
+
 	downloadReq, err := http.NewRequestWithContext(
 		httputils.NewAddrContext(&conn.NetAddr, c.ctx),
 		http.MethodGet,
@@ -300,61 +337,28 @@ func (c *Client) DialStreamUp() (net.Conn, error) {
 		httputils.CloseTransport(downloadTransport)
 		return nil, err
 	}
-	downloadReq.Host = downloadCfg.Host
+	// downloadReq.Host = downloadCfg.Host
 
-	downloadResp, err := downloadTransport.RoundTrip(downloadReq)
-	if err != nil {
-		httputils.CloseTransport(uploadTransport)
-		httputils.CloseTransport(downloadTransport)
-		return nil, err
-	}
-	if downloadResp.StatusCode != http.StatusOK {
-		_ = downloadResp.Body.Close()
-		httputils.CloseTransport(uploadTransport)
-		httputils.CloseTransport(downloadTransport)
-		return nil, fmt.Errorf("xhttp stream-up download bad status: %s", downloadResp.Status)
-	}
-
-	uploadReq, err := http.NewRequestWithContext(
-		c.ctx,
-		http.MethodPost,
-		streamURL.String(),
-		pr,
-	)
-	if err != nil {
-		_ = downloadResp.Body.Close()
-		_ = pr.Close()
-		_ = pw.Close()
-		httputils.CloseTransport(uploadTransport)
-		httputils.CloseTransport(downloadTransport)
-		return nil, err
-	}
-
-	if err := c.cfg.FillStreamRequest(uploadReq, sessionID); err != nil {
-		_ = downloadResp.Body.Close()
-		_ = pr.Close()
-		_ = pw.Close()
-		httputils.CloseTransport(uploadTransport)
-		httputils.CloseTransport(downloadTransport)
-		return nil, err
-	}
-	uploadReq.Host = c.cfg.Host
+	wrc := newWaitReadCloser()
 
 	go func() {
-		resp, err := uploadTransport.RoundTrip(uploadReq)
+		resp, err := downloadTransport.RoundTrip(downloadReq)
 		if err != nil {
-			_ = pw.CloseWithError(err)
+			log.Errorln("xhttp stream-up download RoundTrip error: %s", err)
+			wrc.closeWithError(err)
 			return
 		}
-		defer resp.Body.Close()
-		_, _ = io.Copy(io.Discard, resp.Body)
-
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			_ = pw.CloseWithError(fmt.Errorf("xhttp stream-up upload bad status: %s", resp.Status))
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+			err := fmt.Errorf("xhttp stream-up download bad status: %s", resp.Status)
+			log.Errorln("xhttp stream-up download: %s", err)
+			wrc.closeWithError(err)
+			return
 		}
+		wrc.set(resp.Body)
 	}()
 
-	conn.reader = downloadResp.Body
+	conn.reader = wrc
 	conn.onClose = func() {
 		_ = pr.Close()
 		httputils.CloseTransport(uploadTransport)
@@ -431,6 +435,57 @@ func (c *Client) DialPacketUp() (net.Conn, error) {
 	}
 
 	return conn, nil
+}
+
+type waitReadCloser struct {
+	mu     sync.Mutex
+	ch     chan struct{}
+	reader io.ReadCloser
+	err    error
+}
+
+func newWaitReadCloser() *waitReadCloser {
+	return &waitReadCloser{
+		ch: make(chan struct{}),
+	}
+}
+
+func (w *waitReadCloser) set(rc io.ReadCloser) {
+	w.mu.Lock()
+	w.reader = rc
+	w.mu.Unlock()
+	close(w.ch)
+}
+
+func (w *waitReadCloser) closeWithError(err error) {
+	w.mu.Lock()
+	w.err = err
+	w.mu.Unlock()
+	close(w.ch)
+}
+
+func (w *waitReadCloser) Read(b []byte) (int, error) {
+	<-w.ch
+	w.mu.Lock()
+	if w.err != nil {
+		w.mu.Unlock()
+		return 0, w.err
+	}
+	r := w.reader
+	w.mu.Unlock()
+	return r.Read(b)
+}
+
+func (w *waitReadCloser) Close() error {
+	<-w.ch
+	w.mu.Lock()
+	if w.err != nil {
+		w.mu.Unlock()
+		return w.err
+	}
+	r := w.reader
+	w.mu.Unlock()
+	return r.Close()
 }
 
 func newSessionID() string {
