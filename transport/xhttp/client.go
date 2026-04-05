@@ -16,6 +16,7 @@ import (
 	"github.com/metacubex/mihomo/log"
 
 	"github.com/metacubex/http"
+	"github.com/metacubex/http/httptrace"
 	"github.com/metacubex/tls"
 )
 
@@ -283,9 +284,20 @@ func (c *Client) DialStreamUp() (net.Conn, error) {
 	conn := &Conn{writer: pw}
 
 	sessionID := newSessionID()
+	uploadConnected := make(chan struct{})
+	uploadConnectedOnce := sync.Once{}
+	uploadErrCh := make(chan error, 1)
+	uploadReqCtx, cancelUpload := context.WithCancel(c.ctx)
+	uploadCtx := httptrace.WithClientTrace(uploadReqCtx, &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) {
+			uploadConnectedOnce.Do(func() {
+				close(uploadConnected)
+			})
+		},
+	})
 
 	uploadReq, err := http.NewRequestWithContext(
-		c.ctx,
+		uploadCtx,
 		http.MethodPost,
 		streamURL.String(),
 		pr,
@@ -307,6 +319,10 @@ func (c *Client) DialStreamUp() (net.Conn, error) {
 		resp, err := uploadTransport.RoundTrip(uploadReq)
 		if err != nil {
 			log.Errorln("xhttp stream-up upload RoundTrip error: %s", err)
+			select {
+			case uploadErrCh <- err:
+			default:
+			}
 			_ = pw.CloseWithError(err)
 			return
 		}
@@ -316,9 +332,29 @@ func (c *Client) DialStreamUp() (net.Conn, error) {
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			err := fmt.Errorf("xhttp stream-up upload bad status: %s", resp.Status)
 			log.Errorln("xhttp stream-up upload: %s", err)
+			select {
+			case uploadErrCh <- err:
+			default:
+			}
 			_ = pw.CloseWithError(err)
 		}
 	}()
+
+	select {
+	case <-uploadConnected:
+	case err := <-uploadErrCh:
+		cancelUpload()
+		_ = pr.Close()
+		httputils.CloseTransport(uploadTransport)
+		httputils.CloseTransport(downloadTransport)
+		return nil, err
+	case <-c.ctx.Done():
+		cancelUpload()
+		_ = pr.Close()
+		httputils.CloseTransport(uploadTransport)
+		httputils.CloseTransport(downloadTransport)
+		return nil, c.ctx.Err()
+	}
 
 	downloadReq, err := http.NewRequestWithContext(
 		httputils.NewAddrContext(&conn.NetAddr, c.ctx),
@@ -328,6 +364,7 @@ func (c *Client) DialStreamUp() (net.Conn, error) {
 	)
 	if err != nil {
 		log.Errorln("xhttp stream-up download request build error: %s", err)
+		cancelUpload()
 		httputils.CloseTransport(uploadTransport)
 		httputils.CloseTransport(downloadTransport)
 		return nil, err
@@ -335,6 +372,8 @@ func (c *Client) DialStreamUp() (net.Conn, error) {
 
 	if err := downloadCfg.FillDownloadRequest(downloadReq, sessionID); err != nil {
 		log.Errorln("xhttp stream-up download request fill error: %s", err)
+		cancelUpload()
+		_ = pr.Close()
 		httputils.CloseTransport(uploadTransport)
 		httputils.CloseTransport(downloadTransport)
 		return nil, err
@@ -342,11 +381,28 @@ func (c *Client) DialStreamUp() (net.Conn, error) {
 	downloadReq.Host = downloadCfg.Host
 
 	wrc := newWaitReadCloser()
+	downloadConnected := make(chan struct{})
+	downloadConnectedOnce := sync.Once{}
+	downloadReady := make(chan struct{})
+	downloadReadyOnce := sync.Once{}
+	downloadErrCh := make(chan error, 1)
+	downloadReqCtx, cancelDownload := context.WithCancel(downloadReq.Context())
+	downloadReq = downloadReq.WithContext(httptrace.WithClientTrace(downloadReqCtx, &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) {
+			downloadConnectedOnce.Do(func() {
+				close(downloadConnected)
+			})
+		},
+	}))
 
 	go func() {
 		resp, err := downloadTransport.RoundTrip(downloadReq)
 		if err != nil {
 			log.Errorln("xhttp stream-up download RoundTrip error: %s", err)
+			select {
+			case downloadErrCh <- err:
+			default:
+			}
 			wrc.closeWithError(err)
 			return
 		}
@@ -354,15 +410,44 @@ func (c *Client) DialStreamUp() (net.Conn, error) {
 			_ = resp.Body.Close()
 			err := fmt.Errorf("xhttp stream-up download bad status: %s", resp.Status)
 			log.Errorln("xhttp stream-up download: %s", err)
+			select {
+			case downloadErrCh <- err:
+			default:
+			}
 			wrc.closeWithError(err)
 			return
 		}
+		downloadReadyOnce.Do(func() {
+			close(downloadReady)
+		})
 		wrc.set(resp.Body)
 	}()
 
+	select {
+	case <-downloadConnected:
+	case <-downloadReady:
+	case err := <-downloadErrCh:
+		cancelDownload()
+		cancelUpload()
+		_ = pr.Close()
+		httputils.CloseTransport(uploadTransport)
+		httputils.CloseTransport(downloadTransport)
+		return nil, err
+	case <-c.ctx.Done():
+		cancelDownload()
+		cancelUpload()
+		_ = pr.Close()
+		httputils.CloseTransport(uploadTransport)
+		httputils.CloseTransport(downloadTransport)
+		return nil, c.ctx.Err()
+	}
+
 	conn.reader = wrc
 	conn.onClose = func() {
+		cancelDownload()
+		cancelUpload()
 		_ = pr.Close()
+		wrc.closeWithError(io.ErrClosedPipe)
 		httputils.CloseTransport(uploadTransport)
 		httputils.CloseTransport(downloadTransport)
 	}
