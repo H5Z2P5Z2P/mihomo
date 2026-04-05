@@ -327,17 +327,19 @@ func (c *Client) DialStreamUp() (net.Conn, error) {
 		nil,
 	)
 	if err != nil {
+		log.Errorln("xhttp stream-up download request build error: %s", err)
 		httputils.CloseTransport(uploadTransport)
 		httputils.CloseTransport(downloadTransport)
 		return nil, err
 	}
 
 	if err := downloadCfg.FillDownloadRequest(downloadReq, sessionID); err != nil {
+		log.Errorln("xhttp stream-up download request fill error: %s", err)
 		httputils.CloseTransport(uploadTransport)
 		httputils.CloseTransport(downloadTransport)
 		return nil, err
 	}
-	// downloadReq.Host = downloadCfg.Host
+	downloadReq.Host = downloadCfg.Host
 
 	wrc := newWaitReadCloser()
 
@@ -445,46 +447,53 @@ type waitReadCloser struct {
 }
 
 func newWaitReadCloser() *waitReadCloser {
-	return &waitReadCloser{
-		ch: make(chan struct{}),
-	}
+	return &waitReadCloser{ch: make(chan struct{})}
 }
 
 func (w *waitReadCloser) set(rc io.ReadCloser) {
 	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.reader != nil || w.err != nil {
+		if rc != nil {
+			_ = rc.Close()
+		}
+		return
+	}
 	w.reader = rc
-	w.mu.Unlock()
 	close(w.ch)
 }
 
 func (w *waitReadCloser) closeWithError(err error) {
 	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.reader != nil || w.err != nil {
+		return
+	}
 	w.err = err
-	w.mu.Unlock()
 	close(w.ch)
 }
 
 func (w *waitReadCloser) Read(b []byte) (int, error) {
 	<-w.ch
 	w.mu.Lock()
-	if w.err != nil {
-		w.mu.Unlock()
-		return 0, w.err
-	}
+	err := w.err
 	r := w.reader
 	w.mu.Unlock()
+	if err != nil {
+		return 0, err
+	}
 	return r.Read(b)
 }
 
 func (w *waitReadCloser) Close() error {
 	<-w.ch
 	w.mu.Lock()
-	if w.err != nil {
-		w.mu.Unlock()
-		return w.err
-	}
+	err := w.err
 	r := w.reader
 	w.mu.Unlock()
+	if err != nil {
+		return nil
+	}
 	return r.Close()
 }
 
