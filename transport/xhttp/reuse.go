@@ -2,13 +2,10 @@ package xhttp
 
 import (
 	"fmt"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/metacubex/mihomo/common/httputils"
-
-	"github.com/metacubex/http"
 )
 
 type reuseEntry struct {
@@ -31,7 +28,7 @@ func (e *reuseEntry) close() {
 	if !e.closed.CompareAndSwap(false, true) {
 		return
 	}
-	httputils.CloseTransport(e.transport)
+	closeTransport(e.transport)
 }
 
 type ReuseTransport struct {

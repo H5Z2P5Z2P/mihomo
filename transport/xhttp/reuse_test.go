@@ -1,11 +1,10 @@
 package xhttp
 
 import (
+	"net/http"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/metacubex/http"
 )
 
 type testRoundTripper struct {

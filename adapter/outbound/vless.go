@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	stdhttp "net/http"
 	"strconv"
 
 	"github.com/metacubex/mihomo/common/convert"
@@ -537,7 +538,7 @@ func NewVless(option VlessOption) (*Vless, error) {
 			ReuseConfig:   reuseCfg,
 		}
 
-		makeTransport := func() http.RoundTripper {
+		makeTransport := func() stdhttp.RoundTripper {
 			return xhttp.NewTransport(
 				func(ctx context.Context) (net.Conn, error) {
 					return v.dialer.DialContext(ctx, "tcp", v.addr)
@@ -547,7 +548,7 @@ func NewVless(option VlessOption) (*Vless, error) {
 				},
 			)
 		}
-		var makeDownloadTransport func() http.RoundTripper
+		var makeDownloadTransport func() stdhttp.RoundTripper
 
 		if ds := v.option.XHTTPOpts.DownloadSettings; ds != nil {
 			if cfg.Mode == "stream-one" {
@@ -611,7 +612,7 @@ func NewVless(option VlessOption) (*Vless, error) {
 				ReuseConfig:   downloadReuseCfg,
 			}
 
-			makeDownloadTransport = func() http.RoundTripper {
+			makeDownloadTransport = func() stdhttp.RoundTripper {
 				return xhttp.NewTransport(
 					func(ctx context.Context) (net.Conn, error) {
 						return v.dialer.DialContext(ctx, "tcp", downloadAddr)
