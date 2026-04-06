@@ -2,17 +2,14 @@ package xhttp
 
 import (
 	"fmt"
+	stdhttp "net/http"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/metacubex/mihomo/common/httputils"
-
-	"github.com/metacubex/http"
 )
 
 type reuseEntry struct {
-	transport http.RoundTripper
+	transport stdhttp.RoundTripper
 
 	openUsage     atomic.Int32
 	leftRequests  atomic.Int32
@@ -31,7 +28,7 @@ func (e *reuseEntry) close() {
 	if !e.closed.CompareAndSwap(false, true) {
 		return
 	}
-	httputils.CloseTransport(e.transport)
+	closeTransport(e.transport)
 }
 
 type ReuseTransport struct {
@@ -40,7 +37,7 @@ type ReuseTransport struct {
 	removed atomic.Bool
 }
 
-func (rt *ReuseTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+func (rt *ReuseTransport) RoundTrip(req *stdhttp.Request) (*stdhttp.Response, error) {
 	return rt.entry.transport.RoundTrip(req)
 }
 
@@ -52,7 +49,7 @@ func (rt *ReuseTransport) Close() error {
 	return nil
 }
 
-var _ http.RoundTripper = (*ReuseTransport)(nil)
+var _ stdhttp.RoundTripper = (*ReuseTransport)(nil)
 
 type ReuseManager struct {
 	cfg            *ReuseConfig
@@ -166,7 +163,7 @@ func (m *ReuseManager) canCreateLocked() bool {
 	return len(m.entries) < m.maxConnections
 }
 
-func (m *ReuseManager) newEntryLocked(transport http.RoundTripper, now time.Time) *reuseEntry {
+func (m *ReuseManager) newEntryLocked(transport stdhttp.RoundTripper, now time.Time) *reuseEntry {
 	entry := &reuseEntry{transport: transport}
 
 	hMaxRequestTimes, hMaxReusableSecs, cMaxReuseTimes, _ := m.cfg.ResolveEntryConfig() // error already checked in [NewReuseManager]

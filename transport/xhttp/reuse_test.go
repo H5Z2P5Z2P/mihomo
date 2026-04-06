@@ -1,29 +1,28 @@
 package xhttp
 
 import (
+	stdhttp "net/http"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/metacubex/http"
 )
 
 type testRoundTripper struct {
 	id int64
 }
 
-func (t *testRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+func (t *testRoundTripper) RoundTrip(req *stdhttp.Request) (*stdhttp.Response, error) {
 	panic("not used in reuse manager unit tests")
 }
 
 func makeTestTransportFactory(counter *atomic.Int64) TransportMaker {
-	return func() http.RoundTripper {
+	return func() stdhttp.RoundTripper {
 		id := counter.Add(1)
 		return &testRoundTripper{id: id}
 	}
 }
 
-func transportID(rt http.RoundTripper) int64 {
+func transportID(rt stdhttp.RoundTripper) int64 {
 	return rt.(*testRoundTripper).id
 }
 

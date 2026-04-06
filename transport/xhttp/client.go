@@ -8,27 +8,30 @@ import (
 	"fmt"
 	"io"
 	"net"
+	stdhttp "net/http"
+	stdtrace "net/http/httptrace"
 	"net/url"
 	"strconv"
 	"sync"
 
-	"github.com/metacubex/mihomo/common/httputils"
+	cryptotls "crypto/tls"
 
-	"github.com/metacubex/http"
-	"github.com/metacubex/tls"
+	"golang.org/x/net/http2"
+
+	"github.com/metacubex/mihomo/common/httputils"
 )
 
 type DialRawFunc func(ctx context.Context) (net.Conn, error)
 type WrapTLSFunc func(ctx context.Context, conn net.Conn, isH2 bool) (net.Conn, error)
 
-type TransportMaker func() http.RoundTripper
+type TransportMaker func() stdhttp.RoundTripper
 
 type PacketUpWriter struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	cfg       *Config
 	sessionID string
-	transport http.RoundTripper
+	transport stdhttp.RoundTripper
 	writeMu   sync.Mutex
 	seq       uint64
 }
@@ -43,7 +46,7 @@ func (c *PacketUpWriter) Write(b []byte) (int, error) {
 		Path:   c.cfg.NormalizedPath(),
 	}
 
-	req, err := http.NewRequestWithContext(c.ctx, http.MethodPost, u.String(), nil)
+	req, err := stdhttp.NewRequestWithContext(c.ctx, stdhttp.MethodPost, u.String(), nil)
 	if err != nil {
 		return 0, err
 	}
@@ -63,7 +66,7 @@ func (c *PacketUpWriter) Write(b []byte) (int, error) {
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
 
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != stdhttp.StatusOK {
 		return 0, fmt.Errorf("xhttp packet-up bad status: %s", resp.Status)
 	}
 
@@ -72,13 +75,13 @@ func (c *PacketUpWriter) Write(b []byte) (int, error) {
 
 func (c *PacketUpWriter) Close() error {
 	c.cancel()
-	httputils.CloseTransport(c.transport)
+	closeTransport(c.transport)
 	return nil
 }
 
-func NewTransport(dialRaw DialRawFunc, wrapTLS WrapTLSFunc) http.RoundTripper {
-	return &http.Http2Transport{
-		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+func NewTransport(dialRaw DialRawFunc, wrapTLS WrapTLSFunc) stdhttp.RoundTripper {
+	return &http2.Transport{
+		DialTLSContext: func(ctx context.Context, network, addr string, _ *cryptotls.Config) (net.Conn, error) {
 			raw, err := dialRaw(ctx)
 			if err != nil {
 				return nil, err
@@ -159,24 +162,32 @@ func (c *Client) Close() error {
 }
 
 func (c *Client) Dial() (net.Conn, error) {
+	return c.DialContext(c.ctx)
+}
+
+func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 	switch c.mode {
 	case "stream-one":
-		return c.DialStreamOne()
+		return c.dialStreamOne(ctx)
 	case "stream-up":
-		return c.DialStreamUp()
+		return c.dialStreamUp(ctx)
 	case "packet-up":
-		return c.DialPacketUp()
+		return c.dialPacketUp(ctx)
 	default:
 		return nil, fmt.Errorf("xhttp mode %s is not implemented yet", c.mode)
 	}
 }
 
+func (c *Client) DialStreamOne() (net.Conn, error) { return c.dialStreamOne(c.ctx) }
+func (c *Client) DialStreamUp() (net.Conn, error)  { return c.dialStreamUp(c.ctx) }
+func (c *Client) DialPacketUp() (net.Conn, error)  { return c.dialPacketUp(c.ctx) }
+
 // onlyRoundTripper is a wrapper that prevents the underlying transport from being closed.
 type onlyRoundTripper struct {
-	http.RoundTripper
+	stdhttp.RoundTripper
 }
 
-func (c *Client) getTransport() (uploadTransport http.RoundTripper, downloadTransport http.RoundTripper, err error) {
+func (c *Client) getTransport() (uploadTransport stdhttp.RoundTripper, downloadTransport stdhttp.RoundTripper, err error) {
 	if c.uploadManager == nil {
 		uploadTransport = c.makeTransport()
 		downloadTransport = onlyRoundTripper{uploadTransport}
@@ -193,7 +204,7 @@ func (c *Client) getTransport() (uploadTransport http.RoundTripper, downloadTran
 		if c.downloadManager != nil {
 			downloadTransport, err = c.downloadManager.GetTransport()
 			if err != nil {
-				httputils.CloseTransport(uploadTransport)
+				closeTransport(uploadTransport)
 				return
 			}
 		}
@@ -201,7 +212,47 @@ func (c *Client) getTransport() (uploadTransport http.RoundTripper, downloadTran
 	return
 }
 
-func (c *Client) DialStreamOne() (net.Conn, error) {
+func (c *Client) startRoundTrip(waitCtx context.Context, req *stdhttp.Request, transport stdhttp.RoundTripper, onGotConn func(stdtrace.GotConnInfo), handle func(resp *stdhttp.Response, err error)) error {
+	gotConn := make(chan struct{})
+	gotConnOnce := sync.Once{}
+	readyErrCh := make(chan error, 1)
+
+	req = req.WithContext(stdtrace.WithClientTrace(req.Context(), &stdtrace.ClientTrace{
+		GotConn: func(info stdtrace.GotConnInfo) {
+			if onGotConn != nil {
+				onGotConn(info)
+			}
+			gotConnOnce.Do(func() {
+				close(gotConn)
+			})
+		},
+	}))
+
+	go func() {
+		resp, err := transport.RoundTrip(req)
+		if err != nil {
+			select {
+			case readyErrCh <- err:
+			default:
+			}
+		}
+		gotConnOnce.Do(func() {
+			close(gotConn)
+		})
+		handle(resp, err)
+	}()
+
+	select {
+	case <-gotConn:
+		return nil
+	case err := <-readyErrCh:
+		return err
+	case <-waitCtx.Done():
+		return waitCtx.Err()
+	}
+}
+
+func (c *Client) dialStreamOne(waitCtx context.Context) (net.Conn, error) {
 	transport, _, err := c.getTransport()
 	if err != nil {
 		return nil, err
@@ -213,49 +264,69 @@ func (c *Client) DialStreamOne() (net.Conn, error) {
 		Path:   c.cfg.NormalizedPath(),
 	}
 	pr, pw := io.Pipe()
+	connCtx, cancelConn := context.WithCancel(c.ctx)
+	var localAddr net.Addr
+	var remoteAddr net.Addr
 
 	conn := &Conn{writer: pw}
 
-	req, err := http.NewRequestWithContext(httputils.NewAddrContext(&conn.NetAddr, c.ctx), http.MethodPost, requestURL.String(), pr)
+	req, err := stdhttp.NewRequestWithContext(connCtx, stdhttp.MethodPost, requestURL.String(), pr)
 	if err != nil {
+		cancelConn()
 		_ = pr.Close()
 		_ = pw.Close()
-		httputils.CloseTransport(transport)
+		closeTransport(transport)
 		return nil, err
 	}
 	req.Host = c.cfg.Host
 
 	if err := c.cfg.FillStreamRequest(req, ""); err != nil {
+		cancelConn()
 		_ = pr.Close()
 		_ = pw.Close()
-		httputils.CloseTransport(transport)
+		closeTransport(transport)
 		return nil, err
 	}
 
-	resp, err := transport.RoundTrip(req)
-	if err != nil {
+	wrc := newWaitReadCloser()
+	if err := c.startRoundTrip(waitCtx, req, transport, func(info stdtrace.GotConnInfo) {
+		localAddr = info.Conn.LocalAddr()
+		remoteAddr = info.Conn.RemoteAddr()
+	}, func(resp *stdhttp.Response, err error) {
+		if err != nil {
+			_ = pw.CloseWithError(err)
+			wrc.closeWithError(err)
+			return
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			err = fmt.Errorf("xhttp stream-one bad status: %s", resp.Status)
+			_ = resp.Body.Close()
+			_ = pw.CloseWithError(err)
+			wrc.closeWithError(err)
+			return
+		}
+		wrc.set(resp.Body)
+	}); err != nil {
+		cancelConn()
 		_ = pr.Close()
 		_ = pw.Close()
-		httputils.CloseTransport(transport)
+		_ = wrc.Close()
+		closeTransport(transport)
 		return nil, err
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		_ = resp.Body.Close()
-		_ = pr.Close()
-		_ = pw.Close()
-		httputils.CloseTransport(transport)
-		return nil, fmt.Errorf("xhttp stream-one bad status: %s", resp.Status)
-	}
-	conn.reader = resp.Body
+	conn.reader = wrc
+	httputils.SetAddrs(&conn.NetAddr, localAddr, remoteAddr)
 	conn.onClose = func() {
+		cancelConn()
 		_ = pr.Close()
-		httputils.CloseTransport(transport)
+		_ = wrc.Close()
+		closeTransport(transport)
 	}
 
 	return conn, nil
 }
 
-func (c *Client) DialStreamUp() (net.Conn, error) {
+func (c *Client) dialStreamUp(waitCtx context.Context) (net.Conn, error) {
 	uploadTransport, downloadTransport, err := c.getTransport()
 	if err != nil {
 		return nil, err
@@ -278,70 +349,98 @@ func (c *Client) DialStreamUp() (net.Conn, error) {
 		Path:   downloadCfg.NormalizedPath(),
 	}
 	pr, pw := io.Pipe()
+	connCtx, cancelConn := context.WithCancel(c.ctx)
+	var downloadLocalAddr net.Addr
+	var downloadRemoteAddr net.Addr
+	var uploadLocalAddr net.Addr
+	var uploadRemoteAddr net.Addr
 
 	conn := &Conn{writer: pw}
 
 	sessionID := newSessionID()
 
-	downloadReq, err := http.NewRequestWithContext(
-		httputils.NewAddrContext(&conn.NetAddr, c.ctx),
-		http.MethodGet,
+	downloadReq, err := stdhttp.NewRequestWithContext(
+		connCtx,
+		stdhttp.MethodGet,
 		downloadURL.String(),
 		nil,
 	)
 	if err != nil {
-		httputils.CloseTransport(uploadTransport)
-		httputils.CloseTransport(downloadTransport)
+		cancelConn()
+		closeTransport(uploadTransport)
+		closeTransport(downloadTransport)
 		return nil, err
 	}
 
 	if err := downloadCfg.FillDownloadRequest(downloadReq, sessionID); err != nil {
-		httputils.CloseTransport(uploadTransport)
-		httputils.CloseTransport(downloadTransport)
+		cancelConn()
+		closeTransport(uploadTransport)
+		closeTransport(downloadTransport)
 		return nil, err
 	}
 	downloadReq.Host = downloadCfg.Host
 
-	downloadResp, err := downloadTransport.RoundTrip(downloadReq)
-	if err != nil {
-		httputils.CloseTransport(uploadTransport)
-		httputils.CloseTransport(downloadTransport)
+	wrc := newWaitReadCloser()
+	uploadDone := make(chan struct{})
+	if err := c.startRoundTrip(waitCtx, downloadReq, downloadTransport, func(info stdtrace.GotConnInfo) {
+		downloadLocalAddr = info.Conn.LocalAddr()
+		downloadRemoteAddr = info.Conn.RemoteAddr()
+	}, func(resp *stdhttp.Response, err error) {
+		if err != nil {
+			wrc.closeWithError(err)
+			return
+		}
+		if resp.StatusCode != stdhttp.StatusOK {
+			_ = resp.Body.Close()
+			wrc.closeWithError(fmt.Errorf("xhttp stream-up download bad status: %s", resp.Status))
+			return
+		}
+		wrc.set(resp.Body)
+	}); err != nil {
+		cancelConn()
+		_ = pr.Close()
+		_ = pw.Close()
+		_ = wrc.Close()
+		closeTransport(downloadTransport)
+		go func() {
+			<-uploadDone
+			closeTransport(uploadTransport)
+		}()
 		return nil, err
 	}
-	if downloadResp.StatusCode != http.StatusOK {
-		_ = downloadResp.Body.Close()
-		httputils.CloseTransport(uploadTransport)
-		httputils.CloseTransport(downloadTransport)
-		return nil, fmt.Errorf("xhttp stream-up download bad status: %s", downloadResp.Status)
-	}
 
-	uploadReq, err := http.NewRequestWithContext(
-		c.ctx,
-		http.MethodPost,
+	uploadReq, err := stdhttp.NewRequestWithContext(
+		connCtx,
+		stdhttp.MethodPost,
 		streamURL.String(),
 		pr,
 	)
 	if err != nil {
-		_ = downloadResp.Body.Close()
+		cancelConn()
 		_ = pr.Close()
 		_ = pw.Close()
-		httputils.CloseTransport(uploadTransport)
-		httputils.CloseTransport(downloadTransport)
+		_ = wrc.Close()
+		closeTransport(uploadTransport)
+		closeTransport(downloadTransport)
 		return nil, err
 	}
 
 	if err := c.cfg.FillStreamRequest(uploadReq, sessionID); err != nil {
-		_ = downloadResp.Body.Close()
+		cancelConn()
 		_ = pr.Close()
 		_ = pw.Close()
-		httputils.CloseTransport(uploadTransport)
-		httputils.CloseTransport(downloadTransport)
+		_ = wrc.Close()
+		closeTransport(uploadTransport)
+		closeTransport(downloadTransport)
 		return nil, err
 	}
 	uploadReq.Host = c.cfg.Host
 
-	go func() {
-		resp, err := uploadTransport.RoundTrip(uploadReq)
+	if err := c.startRoundTrip(waitCtx, uploadReq, uploadTransport, func(info stdtrace.GotConnInfo) {
+		uploadLocalAddr = info.Conn.LocalAddr()
+		uploadRemoteAddr = info.Conn.RemoteAddr()
+	}, func(resp *stdhttp.Response, err error) {
+		defer close(uploadDone)
 		if err != nil {
 			_ = pw.CloseWithError(err)
 			return
@@ -352,19 +451,49 @@ func (c *Client) DialStreamUp() (net.Conn, error) {
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			_ = pw.CloseWithError(fmt.Errorf("xhttp stream-up upload bad status: %s", resp.Status))
 		}
-	}()
-
-	conn.reader = downloadResp.Body
-	conn.onClose = func() {
+	}); err != nil {
+		cancelConn()
 		_ = pr.Close()
-		httputils.CloseTransport(uploadTransport)
-		httputils.CloseTransport(downloadTransport)
+		_ = pw.Close()
+		_ = wrc.Close()
+		closeTransport(uploadTransport)
+		closeTransport(downloadTransport)
+		return nil, err
+	}
+
+	localAddr := downloadLocalAddr
+	remoteAddr := downloadRemoteAddr
+	if localAddr == nil {
+		localAddr = uploadLocalAddr
+	}
+	if remoteAddr == nil {
+		remoteAddr = uploadRemoteAddr
+	}
+
+	conn.reader = wrc
+	httputils.SetAddrs(&conn.NetAddr, localAddr, remoteAddr)
+	conn.onClose = func() {
+		cancelConn()
+		_ = pr.Close()
+		_ = wrc.Close()
+		if _, shared := downloadTransport.(onlyRoundTripper); shared {
+			go func() {
+				<-uploadDone
+				closeTransport(uploadTransport)
+			}()
+			return
+		}
+		closeTransport(downloadTransport)
+		go func() {
+			<-uploadDone
+			closeTransport(uploadTransport)
+		}()
 	}
 
 	return conn, nil
 }
 
-func (c *Client) DialPacketUp() (net.Conn, error) {
+func (c *Client) dialPacketUp(waitCtx context.Context) (net.Conn, error) {
 	uploadTransport, downloadTransport, err := c.getTransport()
 	if err != nil {
 		return nil, err
@@ -375,6 +504,9 @@ func (c *Client) DialPacketUp() (net.Conn, error) {
 		downloadCfg = ds
 	}
 	sessionID := newSessionID()
+	connCtx, cancelConn := context.WithCancel(c.ctx)
+	var localAddr net.Addr
+	var remoteAddr net.Addr
 
 	downloadURL := url.URL{
 		Scheme: "https",
@@ -382,10 +514,9 @@ func (c *Client) DialPacketUp() (net.Conn, error) {
 		Path:   downloadCfg.NormalizedPath(),
 	}
 
-	writerCtx, writerCancel := context.WithCancel(c.ctx)
 	writer := &PacketUpWriter{
-		ctx:       writerCtx,
-		cancel:    writerCancel,
+		ctx:       connCtx,
+		cancel:    cancelConn,
 		cfg:       c.cfg,
 		sessionID: sessionID,
 		transport: uploadTransport,
@@ -393,41 +524,56 @@ func (c *Client) DialPacketUp() (net.Conn, error) {
 	}
 	conn := &Conn{writer: writer}
 
-	downloadReq, err := http.NewRequestWithContext(
-		httputils.NewAddrContext(&conn.NetAddr, c.ctx),
-		http.MethodGet,
+	downloadReq, err := stdhttp.NewRequestWithContext(
+		connCtx,
+		stdhttp.MethodGet,
 		downloadURL.String(),
 		nil,
 	)
 	if err != nil {
-		httputils.CloseTransport(uploadTransport)
-		httputils.CloseTransport(downloadTransport)
+		cancelConn()
+		closeTransport(uploadTransport)
+		closeTransport(downloadTransport)
 		return nil, err
 	}
 	if err := downloadCfg.FillDownloadRequest(downloadReq, sessionID); err != nil {
-		httputils.CloseTransport(uploadTransport)
-		httputils.CloseTransport(downloadTransport)
+		cancelConn()
+		closeTransport(uploadTransport)
+		closeTransport(downloadTransport)
 		return nil, err
 	}
 	downloadReq.Host = downloadCfg.Host
 
-	resp, err := downloadTransport.RoundTrip(downloadReq)
-	if err != nil {
-		httputils.CloseTransport(uploadTransport)
-		httputils.CloseTransport(downloadTransport)
+	wrc := newWaitReadCloser()
+	if err := c.startRoundTrip(waitCtx, downloadReq, downloadTransport, func(info stdtrace.GotConnInfo) {
+		localAddr = info.Conn.LocalAddr()
+		remoteAddr = info.Conn.RemoteAddr()
+	}, func(resp *stdhttp.Response, err error) {
+		if err != nil {
+			wrc.closeWithError(err)
+			return
+		}
+		if resp.StatusCode != stdhttp.StatusOK {
+			_ = resp.Body.Close()
+			wrc.closeWithError(fmt.Errorf("xhttp packet-up download bad status: %s", resp.Status))
+			return
+		}
+		wrc.set(resp.Body)
+	}); err != nil {
+		cancelConn()
+		_ = wrc.Close()
+		closeTransport(uploadTransport)
+		closeTransport(downloadTransport)
 		return nil, err
 	}
-	if resp.StatusCode != http.StatusOK {
-		_ = resp.Body.Close()
-		httputils.CloseTransport(uploadTransport)
-		httputils.CloseTransport(downloadTransport)
-		return nil, fmt.Errorf("xhttp packet-up download bad status: %s", resp.Status)
-	}
 
-	conn.reader = resp.Body
+	conn.reader = wrc
+	httputils.SetAddrs(&conn.NetAddr, localAddr, remoteAddr)
 	conn.onClose = func() {
+		cancelConn()
+		_ = wrc.Close()
 		// uploadTransport already closed by writer
-		httputils.CloseTransport(downloadTransport)
+		closeTransport(downloadTransport)
 	}
 
 	return conn, nil
@@ -437,4 +583,80 @@ func newSessionID() string {
 	var b [16]byte
 	_, _ = rand.Read(b[:])
 	return hex.EncodeToString(b[:])
+}
+
+type waitReadCloser struct {
+	mu     sync.Mutex
+	ch     chan struct{}
+	reader io.ReadCloser
+	err    error
+}
+
+func newWaitReadCloser() *waitReadCloser {
+	return &waitReadCloser{ch: make(chan struct{})}
+}
+
+func (w *waitReadCloser) set(rc io.ReadCloser) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.reader != nil || w.err != nil {
+		if rc != nil {
+			_ = rc.Close()
+		}
+		return
+	}
+	w.reader = rc
+	close(w.ch)
+}
+
+func (w *waitReadCloser) closeWithError(err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.reader != nil || w.err != nil {
+		return
+	}
+	w.err = err
+	close(w.ch)
+}
+
+func (w *waitReadCloser) Read(b []byte) (int, error) {
+	<-w.ch
+	w.mu.Lock()
+	err := w.err
+	r := w.reader
+	w.mu.Unlock()
+	if err != nil {
+		return 0, err
+	}
+	return r.Read(b)
+}
+
+func (w *waitReadCloser) Close() error {
+	w.mu.Lock()
+	if w.reader == nil && w.err == nil {
+		w.err = io.ErrClosedPipe
+		close(w.ch)
+		w.mu.Unlock()
+		return nil
+	}
+	err := w.err
+	r := w.reader
+	w.mu.Unlock()
+	if err != nil {
+		return nil
+	}
+	return r.Close()
+}
+
+type closeIdleTransport interface {
+	CloseIdleConnections()
+}
+
+func closeTransport(roundTripper stdhttp.RoundTripper) {
+	if tr, ok := roundTripper.(closeIdleTransport); ok {
+		tr.CloseIdleConnections()
+	}
+	if tr, ok := roundTripper.(io.Closer); ok {
+		_ = tr.Close()
+	}
 }

@@ -35,6 +35,11 @@ func SetAddrFromRequest(addr *NetAddr, request *http.Request) {
 	}
 }
 
+func SetAddrs(addr *NetAddr, localAddr net.Addr, remoteAddr net.Addr) {
+	addr.localAddr = localAddr
+	addr.remoteAddr = remoteAddr
+}
+
 func NewAddrContext(addr *NetAddr, ctx context.Context) context.Context {
 	return httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
 		GotConn: func(connInfo httptrace.GotConnInfo) {

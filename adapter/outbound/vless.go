@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	stdhttp "net/http"
 	"strconv"
 
 	"github.com/metacubex/mihomo/common/convert"
@@ -20,7 +21,7 @@ import (
 	"github.com/metacubex/mihomo/transport/vmess"
 	"github.com/metacubex/mihomo/transport/xhttp"
 
-	"github.com/metacubex/http"
+	metahttp "github.com/metacubex/http"
 	vmessSing "github.com/metacubex/sing-vmess"
 	"github.com/metacubex/sing-vmess/packetaddr"
 	M "github.com/metacubex/sing/common/metadata"
@@ -131,7 +132,7 @@ func (v *Vless) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.M
 			V2rayHttpUpgradeFastOpen: v.option.WSOpts.V2rayHttpUpgradeFastOpen,
 			ClientFingerprint:        v.option.ClientFingerprint,
 			ECHConfig:                v.echConfig,
-			Headers:                  http.Header{},
+			Headers:                  metahttp.Header{},
 		}
 
 		if len(v.option.WSOpts.Headers) != 0 {
@@ -282,7 +283,7 @@ func (v *Vless) dialContext(ctx context.Context) (c net.Conn, err error) {
 	case "grpc": // gun transport
 		return v.gunTransport.Dial()
 	case "xhttp":
-		return v.xhttpClient.Dial()
+		return v.xhttpClient.DialContext(ctx)
 	default:
 	}
 	return v.dialer.DialContext(ctx, "tcp", v.addr)
@@ -537,7 +538,7 @@ func NewVless(option VlessOption) (*Vless, error) {
 			ReuseConfig:   reuseCfg,
 		}
 
-		makeTransport := func() http.RoundTripper {
+		makeTransport := func() stdhttp.RoundTripper {
 			return xhttp.NewTransport(
 				func(ctx context.Context) (net.Conn, error) {
 					return v.dialer.DialContext(ctx, "tcp", v.addr)
@@ -547,7 +548,7 @@ func NewVless(option VlessOption) (*Vless, error) {
 				},
 			)
 		}
-		var makeDownloadTransport func() http.RoundTripper
+		var makeDownloadTransport func() stdhttp.RoundTripper
 
 		if ds := v.option.XHTTPOpts.DownloadSettings; ds != nil {
 			if cfg.Mode == "stream-one" {
@@ -611,7 +612,7 @@ func NewVless(option VlessOption) (*Vless, error) {
 				ReuseConfig:   downloadReuseCfg,
 			}
 
-			makeDownloadTransport = func() http.RoundTripper {
+			makeDownloadTransport = func() stdhttp.RoundTripper {
 				return xhttp.NewTransport(
 					func(ctx context.Context) (net.Conn, error) {
 						return v.dialer.DialContext(ctx, "tcp", downloadAddr)

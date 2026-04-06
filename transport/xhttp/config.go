@@ -5,10 +5,9 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	stdhttp "net/http"
 	"strconv"
 	"strings"
-
-	"github.com/metacubex/http"
 )
 
 type Config struct {
@@ -67,8 +66,8 @@ func (c *Config) NormalizedPath() string {
 	return path
 }
 
-func (c *Config) RequestHeader() http.Header {
-	h := http.Header{}
+func (c *Config) RequestHeader() stdhttp.Header {
+	h := stdhttp.Header{}
 	for k, v := range c.Headers {
 		h.Set(k, v)
 	}
@@ -227,7 +226,7 @@ func (c *ReuseConfig) ResolveEntryConfig() (int, int, int, error) {
 	return hMaxRequestTimes, hMaxReusableSecs, cMaxReuseTimes, nil
 }
 
-func (c *Config) FillStreamRequest(req *http.Request, sessionID string) error {
+func (c *Config) FillStreamRequest(req *stdhttp.Request, sessionID string) error {
 	req.Header = c.RequestHeader()
 
 	paddingValue, err := c.RandomPadding()
@@ -260,7 +259,7 @@ func appendToPath(path, value string) string {
 	return path + "/" + value
 }
 
-func (c *Config) ApplyMetaToRequest(req *http.Request, sessionID string, seqStr string) {
+func (c *Config) ApplyMetaToRequest(req *stdhttp.Request, sessionID string, seqStr string) {
 	if sessionID != "" {
 		req.URL.Path = appendToPath(req.URL.Path, sessionID)
 	}
@@ -269,7 +268,7 @@ func (c *Config) ApplyMetaToRequest(req *http.Request, sessionID string, seqStr 
 	}
 }
 
-func (c *Config) FillPacketRequest(req *http.Request, sessionID string, seqStr string, payload []byte) error {
+func (c *Config) FillPacketRequest(req *stdhttp.Request, sessionID string, seqStr string, payload []byte) error {
 	req.Header = c.RequestHeader()
 	req.Body = io.NopCloser(bytes.NewReader(payload))
 	req.ContentLength = int64(len(payload))
@@ -291,7 +290,7 @@ func (c *Config) FillPacketRequest(req *http.Request, sessionID string, seqStr s
 	return nil
 }
 
-func (c *Config) FillDownloadRequest(req *http.Request, sessionID string) error {
+func (c *Config) FillDownloadRequest(req *stdhttp.Request, sessionID string) error {
 	req.Header = c.RequestHeader()
 
 	paddingValue, err := c.RandomPadding()

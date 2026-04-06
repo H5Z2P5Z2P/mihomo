@@ -117,15 +117,27 @@ func NewServerHandler(opt ServerOption) http.Handler {
 
 func (h *requestHandler) getOrCreateSession(sessionID string) *httpSession {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	s, ok := h.sessions[sessionID]
 	if ok {
+		h.mu.Unlock()
 		return s
 	}
 
 	s = newHTTPSession()
 	h.sessions[sessionID] = s
+	h.mu.Unlock()
+
+	go func() {
+		timer := time.NewTimer(30 * time.Second)
+		defer timer.Stop()
+
+		select {
+		case <-timer.C:
+			h.deleteSession(sessionID)
+		case <-s.connected:
+		}
+	}()
+
 	return s
 }
 
@@ -137,12 +149,6 @@ func (h *requestHandler) deleteSession(sessionID string) {
 		_ = s.uploadQueue.Close()
 		delete(h.sessions, sessionID)
 	}
-}
-
-func (h *requestHandler) getSession(sessionID string) *httpSession {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.sessions[sessionID]
 }
 
 func (h *requestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -237,11 +243,7 @@ func (h *requestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// stream-up upload: POST /path/{session}
 	if r.Method == http.MethodPost && len(parts) == 1 {
 		sessionID := parts[0]
-		session := h.getSession(sessionID)
-		if session == nil {
-			http.Error(w, "unknown xhttp session", http.StatusBadRequest)
-			return
-		}
+		session := h.getOrCreateSession(sessionID)
 
 		httpSC := newHTTPServerConn(w, r.Body)
 		err := session.uploadQueue.Push(Packet{
@@ -302,11 +304,7 @@ func (h *requestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		session := h.getSession(sessionID)
-		if session == nil {
-			http.Error(w, "unknown xhttp session", http.StatusBadRequest)
-			return
-		}
+		session := h.getOrCreateSession(sessionID)
 
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
