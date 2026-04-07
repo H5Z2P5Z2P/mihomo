@@ -10,10 +10,13 @@ import (
 	stdhttp "net/http"
 	"net/http/httptrace"
 	"net/url"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
 
+	xquic "github.com/apernet/quic-go"
+	xhttp3 "github.com/apernet/quic-go/http3"
 	"golang.org/x/net/http2"
 
 	"github.com/metacubex/mihomo/common/httputils"
@@ -25,8 +28,50 @@ import (
 
 type DialRawFunc func(ctx context.Context) (net.Conn, error)
 type WrapTLSFunc func(ctx context.Context, conn net.Conn, isH2 bool) (net.Conn, error)
+type DialPacketFunc func(ctx context.Context) (net.PacketConn, net.Addr, error)
 
 type TransportMaker func() stdhttp.RoundTripper
+
+const (
+	HTTPVersion11 = "1.1"
+	HTTPVersion2  = "2"
+	HTTPVersion3  = "3"
+)
+
+type TransportOption struct {
+	HTTPVersion     string
+	DialRaw         DialRawFunc
+	WrapTLS         WrapTLSFunc
+	DialPacket      DialPacketFunc
+	TLSClientConfig *cryptotls.Config
+	PrepareTLS      func(ctx context.Context, cfg *cryptotls.Config) error
+}
+
+func NormalizeALPN(nextProtos []string) []string {
+	if len(nextProtos) == 0 {
+		return []string{"h2", "http/1.1"}
+	}
+	return slices.Clone(nextProtos)
+}
+
+func DecideHTTPVersion(hasTLS bool, nextProtos []string, hasReality bool) string {
+	if hasReality {
+		return HTTPVersion2
+	}
+	if !hasTLS {
+		return HTTPVersion11
+	}
+	if len(nextProtos) != 1 {
+		return HTTPVersion2
+	}
+	if nextProtos[0] == "http/1.1" {
+		return HTTPVersion11
+	}
+	if nextProtos[0] == "h3" {
+		return HTTPVersion3
+	}
+	return HTTPVersion2
+}
 
 type packetUpWriter struct {
 	ctx        context.Context
@@ -71,23 +116,72 @@ func (w *packetUpWriter) Close() error {
 	return nil
 }
 
-func NewTransport(dialRaw DialRawFunc, wrapTLS WrapTLSFunc) stdhttp.RoundTripper {
-	return &http2.Transport{
-		DialTLSContext: func(ctx context.Context, network, addr string, _ *cryptotls.Config) (net.Conn, error) {
-			raw, err := dialRaw(ctx)
-			if err != nil {
-				return nil, err
-			}
-			wrapped, err := wrapTLS(ctx, raw, true)
-			if err != nil {
-				_ = raw.Close()
-				return nil, err
-			}
-			return wrapped, nil
-		},
-		IdleConnTimeout: xraynet.ConnIdleTimeout,
-		ReadIdleTimeout: xraynet.ChromeH2KeepAlivePeriod,
+func NewTransport(opt TransportOption) stdhttp.RoundTripper {
+	switch opt.HTTPVersion {
+	case HTTPVersion11:
+		return &stdhttp.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return dialTransportConn(ctx, opt.DialRaw, opt.WrapTLS, false)
+			},
+			DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return dialTransportConn(ctx, opt.DialRaw, opt.WrapTLS, false)
+			},
+			ForceAttemptHTTP2: false,
+			IdleConnTimeout:   xraynet.ConnIdleTimeout,
+			DisableKeepAlives: true,
+		}
+	case HTTPVersion3:
+		quicConfig := &xquic.Config{
+			MaxIdleTimeout:  xraynet.ConnIdleTimeout,
+			KeepAlivePeriod: xraynet.QuicgoH3KeepAlivePeriod,
+		}
+		return &xhttp3.Transport{
+			QUICConfig:      quicConfig,
+			TLSClientConfig: opt.TLSClientConfig,
+			Dial: func(ctx context.Context, addr string, tlsCfg *cryptotls.Config, cfg *xquic.Config) (*xquic.Conn, error) {
+				if opt.DialPacket == nil {
+					return nil, errors.New("xhttp: h3 packet dialer is not configured")
+				}
+				if opt.PrepareTLS != nil {
+					if err := opt.PrepareTLS(ctx, tlsCfg); err != nil {
+						return nil, err
+					}
+				}
+				packetConn, remoteAddr, err := opt.DialPacket(ctx)
+				if err != nil {
+					return nil, err
+				}
+				return xquic.DialEarly(ctx, packetConn, remoteAddr, tlsCfg, cfg)
+			},
+		}
+	default:
+		return &http2.Transport{
+			DialTLSContext: func(ctx context.Context, network, addr string, _ *cryptotls.Config) (net.Conn, error) {
+				return dialTransportConn(ctx, opt.DialRaw, opt.WrapTLS, true)
+			},
+			IdleConnTimeout: xraynet.ConnIdleTimeout,
+			ReadIdleTimeout: xraynet.ChromeH2KeepAlivePeriod,
+		}
 	}
+}
+
+func dialTransportConn(ctx context.Context, dialRaw DialRawFunc, wrapTLS WrapTLSFunc, isH2 bool) (net.Conn, error) {
+	if dialRaw == nil {
+		return nil, errors.New("xhttp: transport dialer is not configured")
+	}
+	raw, err := dialRaw(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if wrapTLS == nil {
+		return raw, nil
+	}
+	wrapped, err := wrapTLS(ctx, raw, isH2)
+	if err != nil {
+		_ = raw.Close()
+		return nil, err
+	}
+	return wrapped, nil
 }
 
 type endpointManager struct {
@@ -107,7 +201,7 @@ func newEndpointManager(cfg *Config, makeTransport TransportMaker) (*endpointMan
 	}
 
 	requestURL := url.URL{
-		Scheme:   "https",
+		Scheme:   cfg.RequestScheme(),
 		Host:     xrayCfg.Host,
 		Path:     xrayCfg.GetNormalizedPath(),
 		RawQuery: xrayCfg.GetNormalizedQuery(),

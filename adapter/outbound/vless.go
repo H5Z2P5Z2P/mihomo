@@ -2,6 +2,7 @@ package outbound
 
 import (
 	"context"
+	cryptotls "crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -15,6 +16,7 @@ import (
 	"github.com/metacubex/mihomo/component/ech"
 	tlsC "github.com/metacubex/mihomo/component/tls"
 	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/ntp"
 	"github.com/metacubex/mihomo/transport/gun"
 	"github.com/metacubex/mihomo/transport/vless"
 	"github.com/metacubex/mihomo/transport/vless/encryption"
@@ -116,6 +118,174 @@ type XHTTPDownloadSettings struct {
 	PrivateKey        *string         `proxy:"private-key,omitempty"`
 	ServerName        *string         `proxy:"servername,omitempty"`
 	ClientFingerprint *string         `proxy:"client-fingerprint,omitempty"`
+}
+
+type xhttpEndpointTransportOptions struct {
+	addr              string
+	tls               bool
+	alpn              []string
+	echConfig         *ech.Config
+	realityConfig     *tlsC.RealityConfig
+	skipCertVerify    bool
+	fingerprint       string
+	certificate       string
+	privateKey        string
+	serverName        string
+	clientFingerprint string
+}
+
+func (v *Vless) makeXHTTPTransport(endpoint xhttpEndpointTransportOptions) (func() stdhttp.RoundTripper, string, error) {
+	tlsEnabled := endpoint.tls || endpoint.realityConfig != nil
+	requestScheme := "http"
+	if tlsEnabled {
+		requestScheme = "https"
+	}
+
+	nextProtos := xhttp.NormalizeALPN(endpoint.alpn)
+	httpVersion := xhttp.DecideHTTPVersion(tlsEnabled, nextProtos, endpoint.realityConfig != nil)
+
+	var h3TLSConfig *cryptotls.Config
+	var err error
+	if httpVersion == xhttp.HTTPVersion3 {
+		h3TLSConfig, err = newXHTTP3TLSConfig(endpoint, nextProtos)
+		if err != nil {
+			return nil, "", err
+		}
+	}
+
+	makeTransport := func() stdhttp.RoundTripper {
+		return xhttp.NewTransport(xhttp.TransportOption{
+			HTTPVersion: httpVersion,
+			DialRaw: func(ctx context.Context) (net.Conn, error) {
+				return v.dialer.DialContext(ctx, "tcp", endpoint.addr)
+			},
+			WrapTLS: func(ctx context.Context, raw net.Conn, _ bool) (net.Conn, error) {
+				if !tlsEnabled {
+					return raw, nil
+				}
+
+				host, _, _ := net.SplitHostPort(endpoint.addr)
+				tlsOpts := vmess.TLSConfig{
+					Host:              host,
+					SkipCertVerify:    endpoint.skipCertVerify,
+					FingerPrint:       endpoint.fingerprint,
+					Certificate:       endpoint.certificate,
+					PrivateKey:        endpoint.privateKey,
+					ClientFingerprint: endpoint.clientFingerprint,
+					ECH:               endpoint.echConfig,
+					Reality:           endpoint.realityConfig,
+					NextProtos:        nextProtos,
+				}
+				if endpoint.serverName != "" {
+					tlsOpts.Host = endpoint.serverName
+				}
+
+				return vmess.StreamTLSConn(ctx, raw, &tlsOpts)
+			},
+			DialPacket: func(ctx context.Context) (net.PacketConn, net.Addr, error) {
+				udpAddr, err := resolveUDPAddr(ctx, "udp", endpoint.addr, v.prefer)
+				if err != nil {
+					return nil, nil, err
+				}
+
+				packetConn, err := v.dialer.ListenPacket(ctx, "udp", "", udpAddr.AddrPort())
+				if err != nil {
+					return nil, nil, err
+				}
+
+				return packetConn, udpAddr, nil
+			},
+			TLSClientConfig: h3TLSConfig,
+			PrepareTLS: func(ctx context.Context, tlsCfg *cryptotls.Config) error {
+				return applyECHToStdTLSConfig(ctx, tlsCfg, endpoint.echConfig)
+			},
+		})
+	}
+
+	return makeTransport, requestScheme, nil
+}
+
+func newXHTTP3TLSConfig(endpoint xhttpEndpointTransportOptions, nextProtos []string) (*cryptotls.Config, error) {
+	host, _, _ := net.SplitHostPort(endpoint.addr)
+	tlsConfig := &cryptotls.Config{
+		ServerName:         host,
+		InsecureSkipVerify: endpoint.skipCertVerify,
+		NextProtos:         nextProtos,
+		RootCAs:            ca.GetCertPool(),
+		Time:               ntp.Now,
+	}
+	if endpoint.serverName != "" {
+		tlsConfig.ServerName = endpoint.serverName
+	}
+
+	if endpoint.fingerprint != "" {
+		verifier, err := ca.NewFingerprintVerifier(endpoint.fingerprint, tlsConfig.Time)
+		if err != nil {
+			return nil, err
+		}
+		tlsConfig.VerifyConnection = func(state cryptotls.ConnectionState) error {
+			return verifier(state.PeerCertificates, state.ServerName)
+		}
+		tlsConfig.InsecureSkipVerify = true
+	}
+
+	if endpoint.certificate != "" || endpoint.privateKey != "" {
+		certLoader, err := newStdTLSClientCertificateLoader(endpoint.certificate, endpoint.privateKey)
+		if err != nil {
+			return nil, err
+		}
+		tlsConfig.GetClientCertificate = certLoader
+	}
+
+	return tlsConfig, nil
+}
+
+func applyECHToStdTLSConfig(ctx context.Context, tlsConfig *cryptotls.Config, echConfig *ech.Config) error {
+	if echConfig == nil {
+		return nil
+	}
+
+	echConfigList, err := echConfig.GetEncryptedClientHelloConfigList(ctx, tlsConfig.ServerName)
+	if err != nil {
+		return fmt.Errorf("resolve ECH config error: %w", err)
+	}
+
+	tlsConfig.EncryptedClientHelloConfigList = echConfigList
+	if tlsConfig.MinVersion != 0 && tlsConfig.MinVersion < cryptotls.VersionTLS13 {
+		tlsConfig.MinVersion = cryptotls.VersionTLS13
+	}
+	if tlsConfig.MaxVersion != 0 && tlsConfig.MaxVersion < cryptotls.VersionTLS13 {
+		tlsConfig.MaxVersion = cryptotls.VersionTLS13
+	}
+
+	return nil
+}
+
+func newStdTLSClientCertificateLoader(certificate, privateKey string) (func(*cryptotls.CertificateRequestInfo) (*cryptotls.Certificate, error), error) {
+	if certificate == "" && privateKey == "" {
+		return nil, nil
+	}
+
+	cert, err := cryptotls.X509KeyPair([]byte(certificate), []byte(privateKey))
+	if err != nil {
+		resolvedCertificate := C.Path.Resolve(certificate)
+		resolvedPrivateKey := C.Path.Resolve(privateKey)
+		if !C.Path.IsSafePath(resolvedCertificate) {
+			return nil, C.Path.ErrNotSafePath(resolvedCertificate)
+		}
+		if !C.Path.IsSafePath(resolvedPrivateKey) {
+			return nil, C.Path.ErrNotSafePath(resolvedPrivateKey)
+		}
+
+		cert, err = cryptotls.LoadX509KeyPair(resolvedCertificate, resolvedPrivateKey)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return func(*cryptotls.CertificateRequestInfo) (*cryptotls.Certificate, error) {
+		return &cert, nil
+	}, nil
 }
 
 func (v *Vless) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.Metadata) (_ net.Conn, err error) {
@@ -283,7 +453,7 @@ func (v *Vless) dialContext(ctx context.Context) (c net.Conn, err error) {
 	case "grpc": // gun transport
 		return v.gunTransport.Dial()
 	case "xhttp":
-		return v.xhttpClient.Dial()
+		return v.xhttpClient.DialContext(ctx)
 	default:
 	}
 	return v.dialer.DialContext(ctx, "tcp", v.addr)
@@ -529,6 +699,7 @@ func NewVless(option VlessOption) (*Vless, error) {
 		}
 
 		cfg := &xhttp.Config{
+			Scheme:        "https",
 			Host:          requestHost,
 			Path:          v.option.XHTTPOpts.Path,
 			Mode:          v.option.XHTTPOpts.Mode,
@@ -538,16 +709,23 @@ func NewVless(option VlessOption) (*Vless, error) {
 			ReuseConfig:   reuseCfg,
 		}
 
-		makeTransport := func() stdhttp.RoundTripper {
-			return xhttp.NewTransport(
-				func(ctx context.Context) (net.Conn, error) {
-					return v.dialer.DialContext(ctx, "tcp", v.addr)
-				},
-				func(ctx context.Context, raw net.Conn, isH2 bool) (net.Conn, error) {
-					return v.streamTLSConn(ctx, raw, isH2)
-				},
-			)
+		makeTransport, requestScheme, err := v.makeXHTTPTransport(xhttpEndpointTransportOptions{
+			addr:              v.addr,
+			tls:               v.option.TLS,
+			alpn:              v.option.ALPN,
+			echConfig:         v.echConfig,
+			realityConfig:     v.realityConfig,
+			skipCertVerify:    v.option.SkipCertVerify,
+			fingerprint:       v.option.Fingerprint,
+			certificate:       v.option.Certificate,
+			privateKey:        v.option.PrivateKey,
+			serverName:        v.option.ServerName,
+			clientFingerprint: v.option.ClientFingerprint,
+		})
+		if err != nil {
+			return nil, err
 		}
+		cfg.Scheme = requestScheme
 		var makeDownloadTransport func() stdhttp.RoundTripper
 
 		if ds := v.option.XHTTPOpts.DownloadSettings; ds != nil {
@@ -603,6 +781,7 @@ func NewVless(option VlessOption) (*Vless, error) {
 			}
 
 			cfg.DownloadConfig = &xhttp.Config{
+				Scheme:        "https",
 				Host:          downloadHost,
 				Path:          lo.FromPtrOr(ds.Path, v.option.XHTTPOpts.Path),
 				Mode:          v.option.XHTTPOpts.Mode,
@@ -612,42 +791,23 @@ func NewVless(option VlessOption) (*Vless, error) {
 				ReuseConfig:   downloadReuseCfg,
 			}
 
-			makeDownloadTransport = func() stdhttp.RoundTripper {
-				return xhttp.NewTransport(
-					func(ctx context.Context) (net.Conn, error) {
-						return v.dialer.DialContext(ctx, "tcp", downloadAddr)
-					},
-					func(ctx context.Context, conn net.Conn, isH2 bool) (net.Conn, error) {
-						if downloadTLS {
-							host, _, _ := net.SplitHostPort(downloadAddr)
-
-							tlsOpts := vmess.TLSConfig{
-								Host:              host,
-								SkipCertVerify:    downloadSkipCertVerify,
-								FingerPrint:       downloadFingerprint,
-								Certificate:       downloadCertificate,
-								PrivateKey:        downloadPrivateKey,
-								ClientFingerprint: downloadClientFingerprint,
-								ECH:               downloadEchConfig,
-								Reality:           downloadRealityCfg,
-								NextProtos:        downloadALPN,
-							}
-
-							if isH2 {
-								tlsOpts.NextProtos = []string{"h2"}
-							}
-
-							if downloadServerName != "" {
-								tlsOpts.Host = downloadServerName
-							}
-
-							return vmess.StreamTLSConn(ctx, conn, &tlsOpts)
-						}
-
-						return conn, nil
-					},
-				)
+			makeDownloadTransport, requestScheme, err = v.makeXHTTPTransport(xhttpEndpointTransportOptions{
+				addr:              downloadAddr,
+				tls:               downloadTLS,
+				alpn:              downloadALPN,
+				echConfig:         downloadEchConfig,
+				realityConfig:     downloadRealityCfg,
+				skipCertVerify:    downloadSkipCertVerify,
+				fingerprint:       downloadFingerprint,
+				certificate:       downloadCertificate,
+				privateKey:        downloadPrivateKey,
+				serverName:        downloadServerName,
+				clientFingerprint: downloadClientFingerprint,
+			})
+			if err != nil {
+				return nil, err
 			}
+			cfg.DownloadConfig.Scheme = requestScheme
 		}
 
 		v.xhttpClient, err = xhttp.NewClient(cfg, makeTransport, makeDownloadTransport, v.realityConfig != nil)

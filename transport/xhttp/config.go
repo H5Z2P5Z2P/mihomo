@@ -12,6 +12,7 @@ import (
 )
 
 type Config struct {
+	Scheme               string
 	Host                 string
 	Path                 string
 	Mode                 string
@@ -37,6 +38,13 @@ func (c *Config) NormalizedMode() string {
 		return "auto"
 	}
 	return c.Mode
+}
+
+func (c *Config) RequestScheme() string {
+	if c == nil || c.Scheme == "" {
+		return "https"
+	}
+	return c.Scheme
 }
 
 func (c *Config) EffectiveMode(hasReality bool) string {
