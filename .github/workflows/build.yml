@@ -107,28 +107,6 @@ jobs:
     - name: Verify Go env
       run: go env
 
-      # TODO: remove after issue77731 fixed, see: https://github.com/golang/go/issues/77731
-    - name: Fix issue77731 for Golang1.26
-      if: ${{ matrix.jobs.goversion == '' }}
-      run: |
-        cd $(go env GOROOT)
-        if grep -q '_ENOSYS = 0x26' src/runtime/defs_linux_mips64x.go && grep -q '_ENOSYS = 0x26' src/runtime/defs_linux_mipsx.go; then
-          patch --verbose -p 1 < $GITHUB_WORKSPACE/.github/patch/issue77731.patch
-        else
-          echo "issue77731 already fixed in current Go toolchain; skipping patch"
-        fi
-
-      # TODO: remove after issue77975 fixed, see: https://github.com/golang/go/issues/77975
-    - name: Fix issue77975 for Golang1.26
-      if: ${{ matrix.jobs.goversion == '' }}
-      run: |
-        cd $(go env GOROOT)
-        if grep -q 'func newWSAMsg(p \[\]byte, oob \[\]byte, flags int, unconnected bool)' src/internal/poll/fd_windows.go; then
-          patch --verbose -p 1 < $GITHUB_WORKSPACE/.github/patch/issue77975.patch
-        else
-          echo "issue77975 already fixed in current Go toolchain; skipping patch"
-        fi
-
       # TODO: remove after issue77930 fixed, see: https://github.com/golang/go/issues/77930
     - name: Fix issue77930 for Golang1.26
       if: ${{ matrix.jobs.goversion == '' }}
