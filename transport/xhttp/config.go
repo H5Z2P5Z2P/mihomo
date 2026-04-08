@@ -31,6 +31,7 @@ type ReuseConfig struct {
 	CMaxReuseTimes   string
 	HMaxRequestTimes string
 	HMaxReusableSecs string
+	HKeepAlivePeriod string
 }
 
 func (c *Config) NormalizedMode() string {
@@ -233,6 +234,19 @@ func (c *ReuseConfig) ResolveEntryConfig() (int, int, int, error) {
 	}
 
 	return hMaxRequestTimes, hMaxReusableSecs, cMaxReuseTimes, nil
+}
+
+func (c *ReuseConfig) ResolveKeepAliveSeconds() (int64, error) {
+	if c == nil || strings.TrimSpace(c.HKeepAlivePeriod) == "" {
+		return 0, nil
+	}
+
+	value, err := strconv.ParseInt(strings.TrimSpace(c.HKeepAlivePeriod), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid h-keep-alive-period: %w", err)
+	}
+
+	return value, nil
 }
 
 func (c *Config) FillStreamRequest(req *http.Request, sessionID string) error {

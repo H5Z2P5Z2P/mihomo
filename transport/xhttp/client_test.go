@@ -1,8 +1,20 @@
 package xhttp
 
 import (
+	"context"
+	"errors"
+	"io"
+	"net"
+	stdhttp "net/http"
 	"reflect"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	xhttp3 "github.com/apernet/quic-go/http3"
+	xbuf "github.com/xtls/xray-core/common/buf"
+	xraynet "github.com/xtls/xray-core/common/net"
+	"golang.org/x/net/http2"
 )
 
 func TestNormalizeALPN(t *testing.T) {
@@ -54,5 +66,205 @@ func TestRequestScheme(t *testing.T) {
 	}
 	if got := (&Config{Scheme: "http"}).RequestScheme(); got != "http" {
 		t.Fatalf("custom request scheme = %q, want http", got)
+	}
+}
+
+func TestReuseConfigResolveKeepAliveSeconds(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     *ReuseConfig
+		want    int64
+		wantErr bool
+	}{
+		{name: "nil", cfg: nil, want: 0},
+		{name: "empty", cfg: &ReuseConfig{}, want: 0},
+		{name: "positive", cfg: &ReuseConfig{HKeepAlivePeriod: "45"}, want: 45},
+		{name: "negative", cfg: &ReuseConfig{HKeepAlivePeriod: "-1"}, want: -1},
+		{name: "invalid", cfg: &ReuseConfig{HKeepAlivePeriod: "1-2"}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.cfg.ResolveKeepAliveSeconds()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Fatalf("ResolveKeepAliveSeconds() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestXrayConfigKeepsKeepAlivePeriod(t *testing.T) {
+	xcfg, err := (&ReuseConfig{HKeepAlivePeriod: "45"}).XrayConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if xcfg.HKeepAlivePeriod != 45 {
+		t.Fatalf("XrayConfig().HKeepAlivePeriod = %d, want 45", xcfg.HKeepAlivePeriod)
+	}
+}
+
+func TestNewTransportH2KeepAlivePeriod(t *testing.T) {
+	tests := []struct {
+		name       string
+		keepAlive  time.Duration
+		wantPeriod time.Duration
+	}{
+		{name: "default", keepAlive: 0, wantPeriod: xraynet.ChromeH2KeepAlivePeriod},
+		{name: "custom", keepAlive: 30 * time.Second, wantPeriod: 30 * time.Second},
+		{name: "disabled", keepAlive: -1 * time.Second, wantPeriod: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rt := NewTransport(TransportOption{HTTPVersion: HTTPVersion2, KeepAlivePeriod: tt.keepAlive})
+			managed, ok := rt.(*managedTransport)
+			if !ok {
+				t.Fatalf("transport type = %T, want *managedTransport", rt)
+			}
+			h2Transport, ok := managed.inner.(*http2.Transport)
+			if !ok {
+				t.Fatalf("inner transport type = %T, want *http2.Transport", managed.inner)
+			}
+			if h2Transport.ReadIdleTimeout != tt.wantPeriod {
+				t.Fatalf("ReadIdleTimeout = %s, want %s", h2Transport.ReadIdleTimeout, tt.wantPeriod)
+			}
+		})
+	}
+}
+
+func TestNewTransportH3QUICSettings(t *testing.T) {
+	tests := []struct {
+		name          string
+		keepAlive     time.Duration
+		maxIdle       time.Duration
+		wantKeepAlive time.Duration
+		wantMaxIdle   time.Duration
+	}{
+		{name: "default", keepAlive: 0, maxIdle: 0, wantKeepAlive: xraynet.QuicgoH3KeepAlivePeriod, wantMaxIdle: xraynet.ConnIdleTimeout},
+		{name: "custom", keepAlive: 30 * time.Second, maxIdle: 15 * time.Minute, wantKeepAlive: 30 * time.Second, wantMaxIdle: 15 * time.Minute},
+		{name: "disable keepalive", keepAlive: -1 * time.Second, maxIdle: 0, wantKeepAlive: 0, wantMaxIdle: xraynet.ConnIdleTimeout},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rt := NewTransport(TransportOption{HTTPVersion: HTTPVersion3, QUICKeepAlive: tt.keepAlive, QUICMaxIdle: tt.maxIdle})
+			managed, ok := rt.(*managedTransport)
+			if !ok {
+				t.Fatalf("transport type = %T, want *managedTransport", rt)
+			}
+			h3Transport, ok := managed.inner.(*xhttp3.Transport)
+			if !ok {
+				t.Fatalf("inner transport type = %T, want *http3.Transport", managed.inner)
+			}
+			if h3Transport.QUICConfig.KeepAlivePeriod != tt.wantKeepAlive {
+				t.Fatalf("KeepAlivePeriod = %s, want %s", h3Transport.QUICConfig.KeepAlivePeriod, tt.wantKeepAlive)
+			}
+			if h3Transport.QUICConfig.MaxIdleTimeout != tt.wantMaxIdle {
+				t.Fatalf("MaxIdleTimeout = %s, want %s", h3Transport.QUICConfig.MaxIdleTimeout, tt.wantMaxIdle)
+			}
+		})
+	}
+}
+
+type countingListener struct {
+	net.Listener
+	accepted atomic.Int64
+}
+
+func (l *countingListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err == nil {
+		l.accepted.Add(1)
+	}
+	return conn, err
+}
+
+func TestDialerClientPostPacketReusesH1Conn(t *testing.T) {
+	baseCfg, err := (&Config{Path: "/xhttp"}).XrayConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener := &countingListener{Listener: ln}
+
+	requests := make(chan string, 2)
+	server := &stdhttp.Server{Handler: stdhttp.HandlerFunc(func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+			stdhttp.Error(w, err.Error(), stdhttp.StatusInternalServerError)
+			return
+		}
+		_ = r.Body.Close()
+		requests <- string(body)
+		w.WriteHeader(stdhttp.StatusOK)
+	})}
+
+	serverErrCh := make(chan error, 1)
+	go func() {
+		serverErrCh <- server.Serve(listener)
+	}()
+
+	client := &dialerClient{
+		cfg:         baseCfg,
+		httpVersion: HTTPVersion11,
+		dialUploadConn: func(ctx context.Context) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "tcp", listener.Addr().String())
+		},
+		uploadRawAll: make(map[*H1Conn]struct{}),
+	}
+
+	payload1 := xbuf.MergeBytes(nil, []byte("first"))
+	defer xbuf.ReleaseMulti(payload1)
+	if err := client.PostPacket(context.Background(), "http://"+listener.Addr().String()+"/xhttp/", "session", "0", payload1); err != nil {
+		t.Fatal(err)
+	}
+
+	payload2 := xbuf.MergeBytes(nil, []byte("second"))
+	defer xbuf.ReleaseMulti(payload2)
+	if err := client.PostPacket(context.Background(), "http://"+listener.Addr().String()+"/xhttp/", "session", "1", payload2); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, want := range []string{"first", "second"} {
+		select {
+		case got := <-requests:
+			if got != want {
+				t.Fatalf("request body = %q, want %q", got, want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for %q request", want)
+		}
+	}
+
+	if got := listener.accepted.Load(); got != 1 {
+		t.Fatalf("accepted connections = %d, want 1", got)
+	}
+
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-serverErrCh; err != nil && !errors.Is(err, stdhttp.ErrServerClosed) {
+		t.Fatal(err)
 	}
 }

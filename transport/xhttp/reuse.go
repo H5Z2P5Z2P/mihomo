@@ -72,6 +72,10 @@ func NewReuseManager(cfg *ReuseConfig, makeTransport TransportMaker) (*ReuseMana
 	if err != nil {
 		return nil, err
 	}
+	_, err = cfg.ResolveKeepAliveSeconds()
+	if err != nil {
+		return nil, err
+	}
 	return &ReuseManager{
 		cfg:            cfg,
 		maxConnections: connections,

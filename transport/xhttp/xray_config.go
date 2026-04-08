@@ -61,6 +61,10 @@ func (c *ReuseConfig) XrayConfig() (*xsplithttp.XmuxConfig, error) {
 	if err != nil {
 		return nil, err
 	}
+	hKeepAlivePeriod, err := c.ResolveKeepAliveSeconds()
+	if err != nil {
+		return nil, err
+	}
 
 	return &xsplithttp.XmuxConfig{
 		MaxConcurrency:   maxConcurrency,
@@ -68,6 +72,7 @@ func (c *ReuseConfig) XrayConfig() (*xsplithttp.XmuxConfig, error) {
 		CMaxReuseTimes:   cMaxReuseTimes,
 		HMaxRequestTimes: hMaxRequestTimes,
 		HMaxReusableSecs: hMaxReusableSecs,
+		HKeepAlivePeriod: hKeepAlivePeriod,
 	}, nil
 }
 

@@ -1,6 +1,7 @@
 package xhttp
 
 import (
+	"bytes"
 	"context"
 	cryptotls "crypto/tls"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	xquic "github.com/apernet/quic-go"
 	xhttp3 "github.com/apernet/quic-go/http3"
@@ -43,6 +45,9 @@ type TransportOption struct {
 	DialRaw         DialRawFunc
 	WrapTLS         WrapTLSFunc
 	DialPacket      DialPacketFunc
+	KeepAlivePeriod time.Duration
+	QUICKeepAlive   time.Duration
+	QUICMaxIdle     time.Duration
 	TLSClientConfig *cryptotls.Config
 	PrepareTLS      func(ctx context.Context, cfg *cryptotls.Config) error
 }
@@ -116,10 +121,55 @@ func (w *packetUpWriter) Close() error {
 	return nil
 }
 
+type transportMetadata interface {
+	httpVersion() string
+	dialUploadConn(ctx context.Context) (net.Conn, error)
+}
+
+type managedTransport struct {
+	inner              stdhttp.RoundTripper
+	version            string
+	dialUploadConnFunc func(ctx context.Context) (net.Conn, error)
+}
+
+func (t *managedTransport) RoundTrip(req *stdhttp.Request) (*stdhttp.Response, error) {
+	return t.inner.RoundTrip(req)
+}
+
+func (t *managedTransport) CloseIdleConnections() {
+	if tr, ok := t.inner.(interface{ CloseIdleConnections() }); ok {
+		tr.CloseIdleConnections()
+	}
+}
+
+func (t *managedTransport) Close() error {
+	if tr, ok := t.inner.(io.Closer); ok {
+		return tr.Close()
+	}
+	return nil
+}
+
+func (t *managedTransport) httpVersion() string {
+	return t.version
+}
+
+func (t *managedTransport) dialUploadConn(ctx context.Context) (net.Conn, error) {
+	if t.dialUploadConnFunc == nil {
+		return nil, errors.New("xhttp: h1 upload dialer is not configured")
+	}
+	return t.dialUploadConnFunc(ctx)
+}
+
 func NewTransport(opt TransportOption) stdhttp.RoundTripper {
+	var transport stdhttp.RoundTripper
+	var dialUploadConn func(ctx context.Context) (net.Conn, error)
+
 	switch opt.HTTPVersion {
 	case HTTPVersion11:
-		return &stdhttp.Transport{
+		dialUploadConn = func(ctx context.Context) (net.Conn, error) {
+			return dialTransportConn(ctx, opt.DialRaw, opt.WrapTLS, false)
+		}
+		transport = &stdhttp.Transport{
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				return dialTransportConn(ctx, opt.DialRaw, opt.WrapTLS, false)
 			},
@@ -131,11 +181,27 @@ func NewTransport(opt TransportOption) stdhttp.RoundTripper {
 			DisableKeepAlives: true,
 		}
 	case HTTPVersion3:
-		quicConfig := &xquic.Config{
-			MaxIdleTimeout:  xraynet.ConnIdleTimeout,
-			KeepAlivePeriod: xraynet.QuicgoH3KeepAlivePeriod,
+		quicMaxIdle := opt.QUICMaxIdle
+		if quicMaxIdle == 0 {
+			quicMaxIdle = xraynet.ConnIdleTimeout
 		}
-		return &xhttp3.Transport{
+		if quicMaxIdle < 0 {
+			quicMaxIdle = 0
+		}
+
+		quicKeepAlive := opt.QUICKeepAlive
+		if quicKeepAlive == 0 {
+			quicKeepAlive = xraynet.QuicgoH3KeepAlivePeriod
+		}
+		if quicKeepAlive < 0 {
+			quicKeepAlive = 0
+		}
+
+		quicConfig := &xquic.Config{
+			MaxIdleTimeout:  quicMaxIdle,
+			KeepAlivePeriod: quicKeepAlive,
+		}
+		transport = &xhttp3.Transport{
 			QUICConfig:      quicConfig,
 			TLSClientConfig: opt.TLSClientConfig,
 			Dial: func(ctx context.Context, addr string, tlsCfg *cryptotls.Config, cfg *xquic.Config) (*xquic.Conn, error) {
@@ -155,13 +221,26 @@ func NewTransport(opt TransportOption) stdhttp.RoundTripper {
 			},
 		}
 	default:
-		return &http2.Transport{
+		keepAlivePeriod := opt.KeepAlivePeriod
+		if keepAlivePeriod == 0 {
+			keepAlivePeriod = xraynet.ChromeH2KeepAlivePeriod
+		}
+		if keepAlivePeriod < 0 {
+			keepAlivePeriod = 0
+		}
+		transport = &http2.Transport{
 			DialTLSContext: func(ctx context.Context, network, addr string, _ *cryptotls.Config) (net.Conn, error) {
 				return dialTransportConn(ctx, opt.DialRaw, opt.WrapTLS, true)
 			},
 			IdleConnTimeout: xraynet.ConnIdleTimeout,
-			ReadIdleTimeout: xraynet.ChromeH2KeepAlivePeriod,
+			ReadIdleTimeout: keepAlivePeriod,
 		}
+	}
+
+	return &managedTransport{
+		inner:              transport,
+		version:            opt.HTTPVersion,
+		dialUploadConnFunc: dialUploadConn,
 	}
 }
 
@@ -223,9 +302,17 @@ func newEndpointManager(cfg *Config, makeTransport TransportMaker) (*endpointMan
 }
 
 func (m *endpointManager) newDialerClientLocked() *dialerClient {
+	transport := m.makeTransport()
 	client := &dialerClient{
 		cfg:       m.cfg,
-		transport: m.makeTransport(),
+		transport: transport,
+	}
+	if meta, ok := transport.(transportMetadata); ok {
+		client.httpVersion = meta.httpVersion()
+		client.dialUploadConn = meta.dialUploadConn
+		if client.httpVersion == HTTPVersion11 && client.dialUploadConn != nil {
+			client.uploadRawAll = make(map[*H1Conn]struct{})
+		}
 	}
 	client.client = &stdhttp.Client{Transport: client.transport}
 	m.clients = append(m.clients, client)
@@ -269,11 +356,16 @@ func (m *endpointManager) Close() error {
 }
 
 type dialerClient struct {
-	cfg       *xsplithttp.Config
-	transport stdhttp.RoundTripper
-	client    *stdhttp.Client
-	closed    atomic.Bool
-	closeOnce sync.Once
+	cfg            *xsplithttp.Config
+	transport      stdhttp.RoundTripper
+	client         *stdhttp.Client
+	httpVersion    string
+	dialUploadConn func(ctx context.Context) (net.Conn, error)
+	uploadRawMu    sync.Mutex
+	uploadRawIdle  []*H1Conn
+	uploadRawAll   map[*H1Conn]struct{}
+	closed         atomic.Bool
+	closeOnce      sync.Once
 }
 
 func (c *dialerClient) IsClosed() bool {
@@ -283,9 +375,90 @@ func (c *dialerClient) IsClosed() bool {
 func (c *dialerClient) Close() error {
 	c.closeOnce.Do(func() {
 		c.closed.Store(true)
+		c.closeH1UploadConns()
 		closeTransport(c.transport)
 	})
 	return nil
+}
+
+func (c *dialerClient) getH1UploadConn(ctx context.Context) (*H1Conn, bool, error) {
+	c.uploadRawMu.Lock()
+	if n := len(c.uploadRawIdle); n > 0 {
+		conn := c.uploadRawIdle[n-1]
+		c.uploadRawIdle = c.uploadRawIdle[:n-1]
+		c.uploadRawMu.Unlock()
+		return conn, false, nil
+	}
+	c.uploadRawMu.Unlock()
+
+	if c.dialUploadConn == nil {
+		return nil, false, errors.New("xhttp: h1 upload dialer is not configured")
+	}
+
+	raw, err := c.dialUploadConn(ctx)
+	if err != nil {
+		return nil, true, err
+	}
+	conn := NewH1Conn(raw)
+
+	c.uploadRawMu.Lock()
+	defer c.uploadRawMu.Unlock()
+	if c.uploadRawAll == nil {
+		_ = conn.Close()
+		return nil, true, io.ErrClosedPipe
+	}
+	c.uploadRawAll[conn] = struct{}{}
+	return conn, true, nil
+}
+
+func (c *dialerClient) putH1UploadConn(conn *H1Conn) {
+	if conn == nil {
+		return
+	}
+
+	c.uploadRawMu.Lock()
+	defer c.uploadRawMu.Unlock()
+	if c.uploadRawAll == nil {
+		_ = conn.Close()
+		return
+	}
+	if _, ok := c.uploadRawAll[conn]; !ok {
+		_ = conn.Close()
+		return
+	}
+	c.uploadRawIdle = append(c.uploadRawIdle, conn)
+}
+
+func (c *dialerClient) dropH1UploadConn(conn *H1Conn) {
+	if conn == nil {
+		return
+	}
+
+	c.uploadRawMu.Lock()
+	if c.uploadRawAll != nil {
+		delete(c.uploadRawAll, conn)
+	}
+	for i := len(c.uploadRawIdle) - 1; i >= 0; i-- {
+		if c.uploadRawIdle[i] == conn {
+			c.uploadRawIdle = append(c.uploadRawIdle[:i], c.uploadRawIdle[i+1:]...)
+			break
+		}
+	}
+	c.uploadRawMu.Unlock()
+
+	_ = conn.Close()
+}
+
+func (c *dialerClient) closeH1UploadConns() {
+	c.uploadRawMu.Lock()
+	all := c.uploadRawAll
+	c.uploadRawAll = nil
+	c.uploadRawIdle = nil
+	c.uploadRawMu.Unlock()
+
+	for conn := range all {
+		_ = conn.Close()
+	}
 }
 
 func (c *dialerClient) OpenStream(ctx context.Context, requestURL string, sessionID string, body io.Reader, uploadOnly bool) (io.ReadCloser, net.Addr, net.Addr, error) {
@@ -369,6 +542,44 @@ func (c *dialerClient) PostPacket(ctx context.Context, requestURL string, sessio
 	}
 	if c.cfg.Host != "" {
 		req.Host = c.cfg.Host
+	}
+
+	if c.httpVersion == HTTPVersion11 && c.dialUploadConn != nil {
+		requestBuf := bytes.NewBuffer(make([]byte, 0, 512+len(payload)))
+		if err := req.Write(requestBuf); err != nil {
+			c.closed.Store(true)
+			return err
+		}
+
+		for {
+			uploadConn, newConn, err := c.getH1UploadConn(context.WithoutCancel(ctx))
+			if err != nil {
+				c.closed.Store(true)
+				return err
+			}
+
+			if err := uploadConn.DrainResponse(req); err != nil {
+				c.dropH1UploadConn(uploadConn)
+				if newConn {
+					c.closed.Store(true)
+					return fmt.Errorf("xhttp packet-up read response: %w", err)
+				}
+				continue
+			}
+
+			if _, err := uploadConn.Write(requestBuf.Bytes()); err != nil {
+				c.dropH1UploadConn(uploadConn)
+				if newConn {
+					c.closed.Store(true)
+					return err
+				}
+				continue
+			}
+
+			uploadConn.PendingResponses++
+			c.putH1UploadConn(uploadConn)
+			return nil
+		}
 	}
 
 	resp, err := c.client.Do(req)

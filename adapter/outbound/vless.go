@@ -8,6 +8,7 @@ import (
 	"net"
 	stdhttp "net/http"
 	"strconv"
+	"time"
 
 	"github.com/metacubex/mihomo/common/convert"
 	N "github.com/metacubex/mihomo/common/net"
@@ -79,14 +80,16 @@ type VlessOption struct {
 }
 
 type XHTTPOptions struct {
-	Path             string                 `proxy:"path,omitempty"`
-	Host             string                 `proxy:"host,omitempty"`
-	Mode             string                 `proxy:"mode,omitempty"`
-	Headers          map[string]string      `proxy:"headers,omitempty"`
-	NoGRPCHeader     bool                   `proxy:"no-grpc-header,omitempty"`
-	XPaddingBytes    string                 `proxy:"x-padding-bytes,omitempty"`
-	ReuseSettings    *XHTTPReuseSettings    `proxy:"reuse-settings,omitempty"` // aka XMUX
-	DownloadSettings *XHTTPDownloadSettings `proxy:"download-settings,omitempty"`
+	Path              string                 `proxy:"path,omitempty"`
+	Host              string                 `proxy:"host,omitempty"`
+	Mode              string                 `proxy:"mode,omitempty"`
+	Headers           map[string]string      `proxy:"headers,omitempty"`
+	NoGRPCHeader      bool                   `proxy:"no-grpc-header,omitempty"`
+	XPaddingBytes     string                 `proxy:"x-padding-bytes,omitempty"`
+	H3KeepAlivePeriod int64                  `proxy:"h3-keep-alive-period,omitempty"`
+	H3MaxIdleTimeout  int64                  `proxy:"h3-max-idle-timeout,omitempty"`
+	ReuseSettings     *XHTTPReuseSettings    `proxy:"reuse-settings,omitempty"` // aka XMUX
+	DownloadSettings  *XHTTPDownloadSettings `proxy:"download-settings,omitempty"`
 }
 
 type XHTTPReuseSettings struct {
@@ -95,16 +98,19 @@ type XHTTPReuseSettings struct {
 	CMaxReuseTimes   string `proxy:"c-max-reuse-times,omitempty"`
 	HMaxRequestTimes string `proxy:"h-max-request-times,omitempty"`
 	HMaxReusableSecs string `proxy:"h-max-reusable-secs,omitempty"`
+	HKeepAlivePeriod string `proxy:"h-keep-alive-period,omitempty"`
 }
 
 type XHTTPDownloadSettings struct {
 	// xhttp part
-	Path          *string             `proxy:"path,omitempty"`
-	Host          *string             `proxy:"host,omitempty"`
-	Headers       *map[string]string  `proxy:"headers,omitempty"`
-	NoGRPCHeader  *bool               `proxy:"no-grpc-header,omitempty"`
-	XPaddingBytes *string             `proxy:"x-padding-bytes,omitempty"`
-	ReuseSettings *XHTTPReuseSettings `proxy:"reuse-settings,omitempty"` // aka XMUX
+	Path              *string             `proxy:"path,omitempty"`
+	Host              *string             `proxy:"host,omitempty"`
+	Headers           *map[string]string  `proxy:"headers,omitempty"`
+	NoGRPCHeader      *bool               `proxy:"no-grpc-header,omitempty"`
+	XPaddingBytes     *string             `proxy:"x-padding-bytes,omitempty"`
+	H3KeepAlivePeriod *int64              `proxy:"h3-keep-alive-period,omitempty"`
+	H3MaxIdleTimeout  *int64              `proxy:"h3-max-idle-timeout,omitempty"`
+	ReuseSettings     *XHTTPReuseSettings `proxy:"reuse-settings,omitempty"` // aka XMUX
 	// proxy part
 	Server            *string         `proxy:"server,omitempty"`
 	Port              *int            `proxy:"port,omitempty"`
@@ -124,6 +130,8 @@ type xhttpEndpointTransportOptions struct {
 	addr              string
 	tls               bool
 	alpn              []string
+	h3KeepAlivePeriod int64
+	h3MaxIdleTimeout  int64
 	echConfig         *ech.Config
 	realityConfig     *tlsC.RealityConfig
 	skipCertVerify    bool
@@ -134,7 +142,7 @@ type xhttpEndpointTransportOptions struct {
 	clientFingerprint string
 }
 
-func (v *Vless) makeXHTTPTransport(endpoint xhttpEndpointTransportOptions) (func() stdhttp.RoundTripper, string, error) {
+func (v *Vless) makeXHTTPTransport(endpoint xhttpEndpointTransportOptions, reuseCfg *xhttp.ReuseConfig) (func() stdhttp.RoundTripper, string, error) {
 	tlsEnabled := endpoint.tls || endpoint.realityConfig != nil
 	requestScheme := "http"
 	if tlsEnabled {
@@ -152,6 +160,22 @@ func (v *Vless) makeXHTTPTransport(endpoint xhttpEndpointTransportOptions) (func
 			return nil, "", err
 		}
 	}
+
+	var keepAlivePeriod time.Duration
+	if reuseCfg != nil {
+		keepAliveSeconds, err := reuseCfg.ResolveKeepAliveSeconds()
+		if err != nil {
+			return nil, "", err
+		}
+		keepAlivePeriod = time.Duration(keepAliveSeconds) * time.Second
+	}
+
+	if endpoint.h3MaxIdleTimeout < 0 {
+		return nil, "", fmt.Errorf("xhttp h3-max-idle-timeout cannot be negative")
+	}
+
+	quicKeepAlive := time.Duration(endpoint.h3KeepAlivePeriod) * time.Second
+	quicMaxIdle := time.Duration(endpoint.h3MaxIdleTimeout) * time.Second
 
 	makeTransport := func() stdhttp.RoundTripper {
 		return xhttp.NewTransport(xhttp.TransportOption{
@@ -195,6 +219,9 @@ func (v *Vless) makeXHTTPTransport(endpoint xhttpEndpointTransportOptions) (func
 
 				return packetConn, udpAddr, nil
 			},
+			KeepAlivePeriod: keepAlivePeriod,
+			QUICKeepAlive:   quicKeepAlive,
+			QUICMaxIdle:     quicMaxIdle,
 			TLSClientConfig: h3TLSConfig,
 			PrepareTLS: func(ctx context.Context, tlsCfg *cryptotls.Config) error {
 				return applyECHToStdTLSConfig(ctx, tlsCfg, endpoint.echConfig)
@@ -695,6 +722,7 @@ func NewVless(option VlessOption) (*Vless, error) {
 				CMaxReuseTimes:   option.XHTTPOpts.ReuseSettings.CMaxReuseTimes,
 				HMaxRequestTimes: option.XHTTPOpts.ReuseSettings.HMaxRequestTimes,
 				HMaxReusableSecs: option.XHTTPOpts.ReuseSettings.HMaxReusableSecs,
+				HKeepAlivePeriod: option.XHTTPOpts.ReuseSettings.HKeepAlivePeriod,
 			}
 		}
 
@@ -713,6 +741,8 @@ func NewVless(option VlessOption) (*Vless, error) {
 			addr:              v.addr,
 			tls:               v.option.TLS,
 			alpn:              v.option.ALPN,
+			h3KeepAlivePeriod: v.option.XHTTPOpts.H3KeepAlivePeriod,
+			h3MaxIdleTimeout:  v.option.XHTTPOpts.H3MaxIdleTimeout,
 			echConfig:         v.echConfig,
 			realityConfig:     v.realityConfig,
 			skipCertVerify:    v.option.SkipCertVerify,
@@ -721,7 +751,7 @@ func NewVless(option VlessOption) (*Vless, error) {
 			privateKey:        v.option.PrivateKey,
 			serverName:        v.option.ServerName,
 			clientFingerprint: v.option.ClientFingerprint,
-		})
+		}, reuseCfg)
 		if err != nil {
 			return nil, err
 		}
@@ -777,6 +807,7 @@ func NewVless(option VlessOption) (*Vless, error) {
 					CMaxReuseTimes:   ds.ReuseSettings.CMaxReuseTimes,
 					HMaxRequestTimes: ds.ReuseSettings.HMaxRequestTimes,
 					HMaxReusableSecs: ds.ReuseSettings.HMaxReusableSecs,
+					HKeepAlivePeriod: ds.ReuseSettings.HKeepAlivePeriod,
 				}
 			}
 
@@ -795,6 +826,8 @@ func NewVless(option VlessOption) (*Vless, error) {
 				addr:              downloadAddr,
 				tls:               downloadTLS,
 				alpn:              downloadALPN,
+				h3KeepAlivePeriod: lo.FromPtrOr(ds.H3KeepAlivePeriod, v.option.XHTTPOpts.H3KeepAlivePeriod),
+				h3MaxIdleTimeout:  lo.FromPtrOr(ds.H3MaxIdleTimeout, v.option.XHTTPOpts.H3MaxIdleTimeout),
 				echConfig:         downloadEchConfig,
 				realityConfig:     downloadRealityCfg,
 				skipCertVerify:    downloadSkipCertVerify,
@@ -803,7 +836,7 @@ func NewVless(option VlessOption) (*Vless, error) {
 				privateKey:        downloadPrivateKey,
 				serverName:        downloadServerName,
 				clientFingerprint: downloadClientFingerprint,
-			})
+			}, downloadReuseCfg)
 			if err != nil {
 				return nil, err
 			}
