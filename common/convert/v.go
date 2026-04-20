@@ -174,6 +174,9 @@ func parseXHTTPExtra(extra map[string]any, opts map[string]any) {
 	if v, ok := extra["xPaddingBytes"].(string); ok && v != "" {
 		opts["x-padding-bytes"] = v
 	}
+	if v, ok := xrayRangeString(extra["xPaddingBytes"]); ok && v != "" {
+		opts["x-padding-bytes"] = v
+	}
 	if v, ok := extra["xPaddingObfsMode"].(bool); ok && v {
 		opts["x-padding-obfs-mode"] = true
 	}
@@ -188,6 +191,30 @@ func parseXHTTPExtra(extra map[string]any, opts map[string]any) {
 	}
 	if v, ok := extra["xPaddingMethod"].(string); ok && v != "" {
 		opts["x-padding-method"] = v
+	}
+	if v, ok := extra["uplinkHTTPMethod"].(string); ok && v != "" {
+		opts["uplink-http-method"] = v
+	}
+	if v, ok := extra["sessionPlacement"].(string); ok && v != "" {
+		opts["session-placement"] = v
+	}
+	if v, ok := extra["sessionKey"].(string); ok && v != "" {
+		opts["session-key"] = v
+	}
+	if v, ok := extra["seqPlacement"].(string); ok && v != "" {
+		opts["seq-placement"] = v
+	}
+	if v, ok := extra["seqKey"].(string); ok && v != "" {
+		opts["seq-key"] = v
+	}
+	if v, ok := extra["uplinkDataPlacement"].(string); ok && v != "" {
+		opts["uplink-data-placement"] = v
+	}
+	if v, ok := extra["uplinkDataKey"].(string); ok && v != "" {
+		opts["uplink-data-key"] = v
+	}
+	if v, ok := xrayRangeString(extra["uplinkChunkSize"]); ok && v != "" {
+		opts["uplink-chunk-size"] = v
 	}
 
 	if dsAny, ok := extra["downloadSettings"].(map[string]any); ok {
@@ -235,7 +262,7 @@ func parseXHTTPExtra(extra map[string]any, opts map[string]any) {
 			if v, ok := xhttpAny["noGRPCHeader"].(bool); ok && v {
 				ds["no-grpc-header"] = true
 			}
-			if v, ok := xhttpAny["xPaddingBytes"].(string); ok && v != "" {
+			if v, ok := xrayRangeString(xhttpAny["xPaddingBytes"]); ok && v != "" {
 				ds["x-padding-bytes"] = v
 			}
 			if v, ok := xhttpAny["xPaddingObfsMode"].(bool); ok && v {
@@ -253,10 +280,67 @@ func parseXHTTPExtra(extra map[string]any, opts map[string]any) {
 			if v, ok := xhttpAny["xPaddingMethod"].(string); ok && v != "" {
 				ds["x-padding-method"] = v
 			}
+			if v, ok := xhttpAny["uplinkHTTPMethod"].(string); ok && v != "" {
+				ds["uplink-http-method"] = v
+			}
+			if v, ok := xhttpAny["sessionPlacement"].(string); ok && v != "" {
+				ds["session-placement"] = v
+			}
+			if v, ok := xhttpAny["sessionKey"].(string); ok && v != "" {
+				ds["session-key"] = v
+			}
+			if v, ok := xhttpAny["seqPlacement"].(string); ok && v != "" {
+				ds["seq-placement"] = v
+			}
+			if v, ok := xhttpAny["seqKey"].(string); ok && v != "" {
+				ds["seq-key"] = v
+			}
+			if v, ok := xhttpAny["uplinkDataPlacement"].(string); ok && v != "" {
+				ds["uplink-data-placement"] = v
+			}
+			if v, ok := xhttpAny["uplinkDataKey"].(string); ok && v != "" {
+				ds["uplink-data-key"] = v
+			}
+			if v, ok := xrayRangeString(xhttpAny["uplinkChunkSize"]); ok && v != "" {
+				ds["uplink-chunk-size"] = v
+			}
 		}
 
 		if len(ds) > 0 {
 			opts["download-settings"] = ds
 		}
+	}
+}
+
+func xrayRangeString(value any) (string, bool) {
+	switch v := value.(type) {
+	case string:
+		if v == "" {
+			return "", false
+		}
+		return v, true
+	case map[string]any:
+		from, okFrom := xrayRangeNumber(v["from"])
+		to, okTo := xrayRangeNumber(v["to"])
+		if !okFrom || !okTo {
+			return "", false
+		}
+		if from == to {
+			return strconv.Itoa(from), true
+		}
+		return fmt.Sprintf("%d-%d", from, to), true
+	default:
+		return "", false
+	}
+}
+
+func xrayRangeNumber(value any) (int, bool) {
+	switch v := value.(type) {
+	case float64:
+		return int(v), true
+	case int:
+		return v, true
+	default:
+		return 0, false
 	}
 }

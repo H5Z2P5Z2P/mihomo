@@ -17,6 +17,14 @@ type Config struct {
 	Path                 string
 	Mode                 string
 	Headers              map[string]string
+	UplinkHTTPMethod     string
+	SessionPlacement     string
+	SessionKey           string
+	SeqPlacement         string
+	SeqKey               string
+	UplinkDataPlacement  string
+	UplinkDataKey        string
+	UplinkChunkSize      string
 	NoGRPCHeader         bool
 	XPaddingBytes        string
 	XPaddingObfsMode     bool

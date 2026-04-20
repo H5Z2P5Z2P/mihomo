@@ -133,20 +133,42 @@ func TestConvertsV2RayMieruFragment(t *testing.T) {
 func TestParseXHTTPExtraMapsXPaddingFields(t *testing.T) {
 	opts := map[string]any{}
 	parseXHTTPExtra(map[string]any{
-		"xPaddingBytes":     "100-200",
-		"xPaddingObfsMode":  true,
-		"xPaddingKey":       "pad",
-		"xPaddingHeader":    "X-Obfs",
-		"xPaddingPlacement": "cookie",
-		"xPaddingMethod":    "tokenish",
+		"xPaddingBytes":       "100-200",
+		"xPaddingObfsMode":    true,
+		"xPaddingKey":         "pad",
+		"xPaddingHeader":      "X-Obfs",
+		"xPaddingPlacement":   "cookie",
+		"xPaddingMethod":      "tokenish",
+		"uplinkHTTPMethod":    "GET",
+		"sessionPlacement":    "header",
+		"sessionKey":          "X-Session-Test",
+		"seqPlacement":        "query",
+		"seqKey":              "x-seq-test",
+		"uplinkDataPlacement": "header",
+		"uplinkDataKey":       "X-Data-Test",
+		"uplinkChunkSize": map[string]any{
+			"from": 3000.0,
+			"to":   4000.0,
+		},
 		"downloadSettings": map[string]any{
 			"xhttpSettings": map[string]any{
-				"xPaddingBytes":     "200-300",
-				"xPaddingObfsMode":  true,
-				"xPaddingKey":       "down_pad",
-				"xPaddingHeader":    "X-Down-Obfs",
-				"xPaddingPlacement": "header",
-				"xPaddingMethod":    "repeat-x",
+				"xPaddingBytes":       "200-300",
+				"xPaddingObfsMode":    true,
+				"xPaddingKey":         "down_pad",
+				"xPaddingHeader":      "X-Down-Obfs",
+				"xPaddingPlacement":   "header",
+				"xPaddingMethod":      "repeat-x",
+				"uplinkHTTPMethod":    "POST",
+				"sessionPlacement":    "cookie",
+				"sessionKey":          "down_session",
+				"seqPlacement":        "header",
+				"seqKey":              "X-Down-Seq",
+				"uplinkDataPlacement": "cookie",
+				"uplinkDataKey":       "down_data",
+				"uplinkChunkSize": map[string]any{
+					"from": 2048.0,
+					"to":   3072.0,
+				},
 			},
 		},
 	}, opts)
@@ -157,6 +179,14 @@ func TestParseXHTTPExtraMapsXPaddingFields(t *testing.T) {
 	assert.Equal(t, "X-Obfs", opts["x-padding-header"])
 	assert.Equal(t, "cookie", opts["x-padding-placement"])
 	assert.Equal(t, "tokenish", opts["x-padding-method"])
+	assert.Equal(t, "GET", opts["uplink-http-method"])
+	assert.Equal(t, "header", opts["session-placement"])
+	assert.Equal(t, "X-Session-Test", opts["session-key"])
+	assert.Equal(t, "query", opts["seq-placement"])
+	assert.Equal(t, "x-seq-test", opts["seq-key"])
+	assert.Equal(t, "header", opts["uplink-data-placement"])
+	assert.Equal(t, "X-Data-Test", opts["uplink-data-key"])
+	assert.Equal(t, "3000-4000", opts["uplink-chunk-size"])
 
 	ds, ok := opts["download-settings"].(map[string]any)
 	if !ok {
@@ -168,4 +198,12 @@ func TestParseXHTTPExtraMapsXPaddingFields(t *testing.T) {
 	assert.Equal(t, "X-Down-Obfs", ds["x-padding-header"])
 	assert.Equal(t, "header", ds["x-padding-placement"])
 	assert.Equal(t, "repeat-x", ds["x-padding-method"])
+	assert.Equal(t, "POST", ds["uplink-http-method"])
+	assert.Equal(t, "cookie", ds["session-placement"])
+	assert.Equal(t, "down_session", ds["session-key"])
+	assert.Equal(t, "header", ds["seq-placement"])
+	assert.Equal(t, "X-Down-Seq", ds["seq-key"])
+	assert.Equal(t, "cookie", ds["uplink-data-placement"])
+	assert.Equal(t, "down_data", ds["uplink-data-key"])
+	assert.Equal(t, "2048-3072", ds["uplink-chunk-size"])
 }

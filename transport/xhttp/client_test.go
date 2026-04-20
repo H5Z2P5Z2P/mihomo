@@ -171,6 +171,64 @@ func TestXrayConfigRejectsInvalidXPaddingSettings(t *testing.T) {
 	}
 }
 
+func TestXrayConfigNormalizesUplinkAndMetaControls(t *testing.T) {
+	xcfg, err := (&Config{
+		Path:                "/xhttp",
+		Mode:                "packet-up",
+		UplinkHTTPMethod:    "get",
+		SessionPlacement:    xPaddingPlacementHeader,
+		SeqPlacement:        xPaddingPlacementQuery,
+		UplinkDataPlacement: xPaddingPlacementAuto,
+		UplinkChunkSize:     "3000-4000",
+	}).XrayConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if xcfg.UplinkHTTPMethod != "GET" {
+		t.Fatalf("UplinkHTTPMethod = %q, want GET", xcfg.UplinkHTTPMethod)
+	}
+	if xcfg.SessionPlacement != xPaddingPlacementHeader {
+		t.Fatalf("SessionPlacement = %q, want %q", xcfg.SessionPlacement, xPaddingPlacementHeader)
+	}
+	if xcfg.SessionKey != "X-Session" {
+		t.Fatalf("SessionKey = %q, want X-Session", xcfg.SessionKey)
+	}
+	if xcfg.SeqPlacement != xPaddingPlacementQuery {
+		t.Fatalf("SeqPlacement = %q, want %q", xcfg.SeqPlacement, xPaddingPlacementQuery)
+	}
+	if xcfg.SeqKey != "x_seq" {
+		t.Fatalf("SeqKey = %q, want x_seq", xcfg.SeqKey)
+	}
+	if xcfg.UplinkDataPlacement != xPaddingPlacementAuto {
+		t.Fatalf("UplinkDataPlacement = %q, want %q", xcfg.UplinkDataPlacement, xPaddingPlacementAuto)
+	}
+	if xcfg.UplinkDataKey != "X-Data" {
+		t.Fatalf("UplinkDataKey = %q, want X-Data", xcfg.UplinkDataKey)
+	}
+	if xcfg.UplinkChunkSize == nil || xcfg.UplinkChunkSize.From != 3000 || xcfg.UplinkChunkSize.To != 4000 {
+		t.Fatalf("UplinkChunkSize = %#v, want 3000-4000", xcfg.UplinkChunkSize)
+	}
+}
+
+func TestXrayConfigRejectsInvalidUplinkAndMetaControls(t *testing.T) {
+	if _, err := (&Config{Path: "/xhttp", SessionPlacement: "bad"}).XrayConfig(); err == nil {
+		t.Fatal("expected invalid session placement error")
+	}
+	if _, err := (&Config{Path: "/xhttp", SeqPlacement: "bad"}).XrayConfig(); err == nil {
+		t.Fatal("expected invalid seq placement error")
+	}
+	if _, err := (&Config{Path: "/xhttp", Mode: "stream-up", UplinkHTTPMethod: "GET"}).XrayConfig(); err == nil {
+		t.Fatal("expected invalid uplinkHTTPMethod error")
+	}
+	if _, err := (&Config{Path: "/xhttp", Mode: "stream-up", UplinkDataPlacement: xPaddingPlacementHeader}).XrayConfig(); err == nil {
+		t.Fatal("expected invalid uplinkDataPlacement error")
+	}
+	if _, err := (&Config{Path: "/xhttp", UplinkDataPlacement: "bad"}).XrayConfig(); err == nil {
+		t.Fatal("expected invalid uplinkDataPlacement value error")
+	}
+}
+
 func TestNewTransportH2KeepAlivePeriod(t *testing.T) {
 	tests := []struct {
 		name       string
