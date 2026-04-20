@@ -19,6 +19,11 @@ type Config struct {
 	Headers              map[string]string
 	NoGRPCHeader         bool
 	XPaddingBytes        string
+	XPaddingObfsMode     bool
+	XPaddingKey          string
+	XPaddingHeader       string
+	XPaddingPlacement    string
+	XPaddingMethod       string
 	NoSSEHeader          bool   // server only
 	ScStreamUpServerSecs string // server only
 	ReuseConfig          *ReuseConfig

@@ -174,6 +174,21 @@ func parseXHTTPExtra(extra map[string]any, opts map[string]any) {
 	if v, ok := extra["xPaddingBytes"].(string); ok && v != "" {
 		opts["x-padding-bytes"] = v
 	}
+	if v, ok := extra["xPaddingObfsMode"].(bool); ok && v {
+		opts["x-padding-obfs-mode"] = true
+	}
+	if v, ok := extra["xPaddingKey"].(string); ok && v != "" {
+		opts["x-padding-key"] = v
+	}
+	if v, ok := extra["xPaddingHeader"].(string); ok && v != "" {
+		opts["x-padding-header"] = v
+	}
+	if v, ok := extra["xPaddingPlacement"].(string); ok && v != "" {
+		opts["x-padding-placement"] = v
+	}
+	if v, ok := extra["xPaddingMethod"].(string); ok && v != "" {
+		opts["x-padding-method"] = v
+	}
 
 	if dsAny, ok := extra["downloadSettings"].(map[string]any); ok {
 		ds := make(map[string]any)
@@ -222,6 +237,21 @@ func parseXHTTPExtra(extra map[string]any, opts map[string]any) {
 			}
 			if v, ok := xhttpAny["xPaddingBytes"].(string); ok && v != "" {
 				ds["x-padding-bytes"] = v
+			}
+			if v, ok := xhttpAny["xPaddingObfsMode"].(bool); ok && v {
+				ds["x-padding-obfs-mode"] = true
+			}
+			if v, ok := xhttpAny["xPaddingKey"].(string); ok && v != "" {
+				ds["x-padding-key"] = v
+			}
+			if v, ok := xhttpAny["xPaddingHeader"].(string); ok && v != "" {
+				ds["x-padding-header"] = v
+			}
+			if v, ok := xhttpAny["xPaddingPlacement"].(string); ok && v != "" {
+				ds["x-padding-placement"] = v
+			}
+			if v, ok := xhttpAny["xPaddingMethod"].(string); ok && v != "" {
+				ds["x-padding-method"] = v
 			}
 		}
 

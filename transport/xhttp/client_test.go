@@ -112,6 +112,65 @@ func TestXrayConfigKeepsKeepAlivePeriod(t *testing.T) {
 	}
 }
 
+func TestXrayConfigNormalizesXPaddingDefaults(t *testing.T) {
+	xcfg, err := (&Config{Path: "/xhttp", XPaddingObfsMode: true}).XrayConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !xcfg.XPaddingObfsMode {
+		t.Fatal("XPaddingObfsMode = false, want true")
+	}
+	if xcfg.XPaddingKey != "x_padding" {
+		t.Fatalf("XPaddingKey = %q, want x_padding", xcfg.XPaddingKey)
+	}
+	if xcfg.XPaddingHeader != "X-Padding" {
+		t.Fatalf("XPaddingHeader = %q, want X-Padding", xcfg.XPaddingHeader)
+	}
+	if xcfg.XPaddingPlacement != xPaddingPlacementQueryInHeader {
+		t.Fatalf("XPaddingPlacement = %q, want %q", xcfg.XPaddingPlacement, xPaddingPlacementQueryInHeader)
+	}
+	if xcfg.XPaddingMethod != xPaddingMethodRepeatX {
+		t.Fatalf("XPaddingMethod = %q, want %q", xcfg.XPaddingMethod, xPaddingMethodRepeatX)
+	}
+}
+
+func TestXrayConfigKeepsCustomXPaddingSettings(t *testing.T) {
+	xcfg, err := (&Config{
+		Path:              "/xhttp",
+		XPaddingObfsMode:  true,
+		XPaddingKey:       "pad",
+		XPaddingHeader:    "X-Obfs",
+		XPaddingPlacement: xPaddingPlacementCookie,
+		XPaddingMethod:    xPaddingMethodTokenish,
+	}).XrayConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if xcfg.XPaddingKey != "pad" {
+		t.Fatalf("XPaddingKey = %q, want pad", xcfg.XPaddingKey)
+	}
+	if xcfg.XPaddingHeader != "X-Obfs" {
+		t.Fatalf("XPaddingHeader = %q, want X-Obfs", xcfg.XPaddingHeader)
+	}
+	if xcfg.XPaddingPlacement != xPaddingPlacementCookie {
+		t.Fatalf("XPaddingPlacement = %q, want %q", xcfg.XPaddingPlacement, xPaddingPlacementCookie)
+	}
+	if xcfg.XPaddingMethod != xPaddingMethodTokenish {
+		t.Fatalf("XPaddingMethod = %q, want %q", xcfg.XPaddingMethod, xPaddingMethodTokenish)
+	}
+}
+
+func TestXrayConfigRejectsInvalidXPaddingSettings(t *testing.T) {
+	if _, err := (&Config{Path: "/xhttp", XPaddingPlacement: "bad"}).XrayConfig(); err == nil {
+		t.Fatal("expected invalid placement error")
+	}
+	if _, err := (&Config{Path: "/xhttp", XPaddingMethod: "bad"}).XrayConfig(); err == nil {
+		t.Fatal("expected invalid method error")
+	}
+}
+
 func TestNewTransportH2KeepAlivePeriod(t *testing.T) {
 	tests := []struct {
 		name       string

@@ -86,6 +86,11 @@ type XHTTPOptions struct {
 	Headers           map[string]string      `proxy:"headers,omitempty"`
 	NoGRPCHeader      bool                   `proxy:"no-grpc-header,omitempty"`
 	XPaddingBytes     string                 `proxy:"x-padding-bytes,omitempty"`
+	XPaddingObfsMode  bool                   `proxy:"x-padding-obfs-mode,omitempty"`
+	XPaddingKey       string                 `proxy:"x-padding-key,omitempty"`
+	XPaddingHeader    string                 `proxy:"x-padding-header,omitempty"`
+	XPaddingPlacement string                 `proxy:"x-padding-placement,omitempty"`
+	XPaddingMethod    string                 `proxy:"x-padding-method,omitempty"`
 	H3KeepAlivePeriod int64                  `proxy:"h3-keep-alive-period,omitempty"`
 	H3MaxIdleTimeout  int64                  `proxy:"h3-max-idle-timeout,omitempty"`
 	ReuseSettings     *XHTTPReuseSettings    `proxy:"reuse-settings,omitempty"` // aka XMUX
@@ -108,6 +113,11 @@ type XHTTPDownloadSettings struct {
 	Headers           *map[string]string  `proxy:"headers,omitempty"`
 	NoGRPCHeader      *bool               `proxy:"no-grpc-header,omitempty"`
 	XPaddingBytes     *string             `proxy:"x-padding-bytes,omitempty"`
+	XPaddingObfsMode  *bool               `proxy:"x-padding-obfs-mode,omitempty"`
+	XPaddingKey       *string             `proxy:"x-padding-key,omitempty"`
+	XPaddingHeader    *string             `proxy:"x-padding-header,omitempty"`
+	XPaddingPlacement *string             `proxy:"x-padding-placement,omitempty"`
+	XPaddingMethod    *string             `proxy:"x-padding-method,omitempty"`
 	H3KeepAlivePeriod *int64              `proxy:"h3-keep-alive-period,omitempty"`
 	H3MaxIdleTimeout  *int64              `proxy:"h3-max-idle-timeout,omitempty"`
 	ReuseSettings     *XHTTPReuseSettings `proxy:"reuse-settings,omitempty"` // aka XMUX
@@ -727,14 +737,19 @@ func NewVless(option VlessOption) (*Vless, error) {
 		}
 
 		cfg := &xhttp.Config{
-			Scheme:        "https",
-			Host:          requestHost,
-			Path:          v.option.XHTTPOpts.Path,
-			Mode:          v.option.XHTTPOpts.Mode,
-			Headers:       v.option.XHTTPOpts.Headers,
-			NoGRPCHeader:  v.option.XHTTPOpts.NoGRPCHeader,
-			XPaddingBytes: v.option.XHTTPOpts.XPaddingBytes,
-			ReuseConfig:   reuseCfg,
+			Scheme:            "https",
+			Host:              requestHost,
+			Path:              v.option.XHTTPOpts.Path,
+			Mode:              v.option.XHTTPOpts.Mode,
+			Headers:           v.option.XHTTPOpts.Headers,
+			NoGRPCHeader:      v.option.XHTTPOpts.NoGRPCHeader,
+			XPaddingBytes:     v.option.XHTTPOpts.XPaddingBytes,
+			XPaddingObfsMode:  v.option.XHTTPOpts.XPaddingObfsMode,
+			XPaddingKey:       v.option.XHTTPOpts.XPaddingKey,
+			XPaddingHeader:    v.option.XHTTPOpts.XPaddingHeader,
+			XPaddingPlacement: v.option.XHTTPOpts.XPaddingPlacement,
+			XPaddingMethod:    v.option.XHTTPOpts.XPaddingMethod,
+			ReuseConfig:       reuseCfg,
 		}
 
 		makeTransport, requestScheme, err := v.makeXHTTPTransport(xhttpEndpointTransportOptions{
@@ -812,14 +827,19 @@ func NewVless(option VlessOption) (*Vless, error) {
 			}
 
 			cfg.DownloadConfig = &xhttp.Config{
-				Scheme:        "https",
-				Host:          downloadHost,
-				Path:          lo.FromPtrOr(ds.Path, v.option.XHTTPOpts.Path),
-				Mode:          v.option.XHTTPOpts.Mode,
-				Headers:       lo.FromPtrOr(ds.Headers, v.option.XHTTPOpts.Headers),
-				NoGRPCHeader:  lo.FromPtrOr(ds.NoGRPCHeader, v.option.XHTTPOpts.NoGRPCHeader),
-				XPaddingBytes: lo.FromPtrOr(ds.XPaddingBytes, v.option.XHTTPOpts.XPaddingBytes),
-				ReuseConfig:   downloadReuseCfg,
+				Scheme:            "https",
+				Host:              downloadHost,
+				Path:              lo.FromPtrOr(ds.Path, v.option.XHTTPOpts.Path),
+				Mode:              v.option.XHTTPOpts.Mode,
+				Headers:           lo.FromPtrOr(ds.Headers, v.option.XHTTPOpts.Headers),
+				NoGRPCHeader:      lo.FromPtrOr(ds.NoGRPCHeader, v.option.XHTTPOpts.NoGRPCHeader),
+				XPaddingBytes:     lo.FromPtrOr(ds.XPaddingBytes, v.option.XHTTPOpts.XPaddingBytes),
+				XPaddingObfsMode:  lo.FromPtrOr(ds.XPaddingObfsMode, v.option.XHTTPOpts.XPaddingObfsMode),
+				XPaddingKey:       lo.FromPtrOr(ds.XPaddingKey, v.option.XHTTPOpts.XPaddingKey),
+				XPaddingHeader:    lo.FromPtrOr(ds.XPaddingHeader, v.option.XHTTPOpts.XPaddingHeader),
+				XPaddingPlacement: lo.FromPtrOr(ds.XPaddingPlacement, v.option.XHTTPOpts.XPaddingPlacement),
+				XPaddingMethod:    lo.FromPtrOr(ds.XPaddingMethod, v.option.XHTTPOpts.XPaddingMethod),
+				ReuseConfig:       downloadReuseCfg,
 			}
 
 			makeDownloadTransport, requestScheme, err = v.makeXHTTPTransport(xhttpEndpointTransportOptions{

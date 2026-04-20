@@ -129,3 +129,43 @@ func TestConvertsV2RayMieruFragment(t *testing.T) {
 	assert.Len(t, proxies, 1)
 	assert.Equal(t, "myproxy:443/TCP", proxies[0]["name"])
 }
+
+func TestParseXHTTPExtraMapsXPaddingFields(t *testing.T) {
+	opts := map[string]any{}
+	parseXHTTPExtra(map[string]any{
+		"xPaddingBytes":     "100-200",
+		"xPaddingObfsMode":  true,
+		"xPaddingKey":       "pad",
+		"xPaddingHeader":    "X-Obfs",
+		"xPaddingPlacement": "cookie",
+		"xPaddingMethod":    "tokenish",
+		"downloadSettings": map[string]any{
+			"xhttpSettings": map[string]any{
+				"xPaddingBytes":     "200-300",
+				"xPaddingObfsMode":  true,
+				"xPaddingKey":       "down_pad",
+				"xPaddingHeader":    "X-Down-Obfs",
+				"xPaddingPlacement": "header",
+				"xPaddingMethod":    "repeat-x",
+			},
+		},
+	}, opts)
+
+	assert.Equal(t, "100-200", opts["x-padding-bytes"])
+	assert.Equal(t, true, opts["x-padding-obfs-mode"])
+	assert.Equal(t, "pad", opts["x-padding-key"])
+	assert.Equal(t, "X-Obfs", opts["x-padding-header"])
+	assert.Equal(t, "cookie", opts["x-padding-placement"])
+	assert.Equal(t, "tokenish", opts["x-padding-method"])
+
+	ds, ok := opts["download-settings"].(map[string]any)
+	if !ok {
+		t.Fatalf("download-settings = %T, want map[string]any", opts["download-settings"])
+	}
+	assert.Equal(t, "200-300", ds["x-padding-bytes"])
+	assert.Equal(t, true, ds["x-padding-obfs-mode"])
+	assert.Equal(t, "down_pad", ds["x-padding-key"])
+	assert.Equal(t, "X-Down-Obfs", ds["x-padding-header"])
+	assert.Equal(t, "header", ds["x-padding-placement"])
+	assert.Equal(t, "repeat-x", ds["x-padding-method"])
+}
