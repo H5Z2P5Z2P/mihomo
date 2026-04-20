@@ -15,8 +15,6 @@ type Conn struct {
 	onClose func()
 	httputils.NetAddr
 
-	// deadlines
-	deadline  *time.Timer
 	closeOnce sync.Once
 }
 
@@ -45,20 +43,8 @@ func (c *Conn) SetReadDeadline(t time.Time) error  { return c.SetDeadline(t) }
 func (c *Conn) SetWriteDeadline(t time.Time) error { return c.SetDeadline(t) }
 
 func (c *Conn) SetDeadline(t time.Time) error {
-	if t.IsZero() {
-		if c.deadline != nil {
-			c.deadline.Stop()
-			c.deadline = nil
-		}
-		return nil
-	}
-	d := time.Until(t)
-	if c.deadline != nil {
-		c.deadline.Reset(d)
-		return nil
-	}
-	c.deadline = time.AfterFunc(d, func() {
-		c.Close()
-	})
+	// Align with Xray splitConn: xhttp does not implement transport-level
+	// deadlines, and treating them as hard close timers makes idle sessions
+	// disconnect under normal upper-layer deadline usage.
 	return nil
 }
