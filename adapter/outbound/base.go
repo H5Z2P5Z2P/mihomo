@@ -189,16 +189,17 @@ func (b *BasicOption) NewDialer(opts []dialer.Option) C.Dialer {
 }
 
 type BaseOption struct {
-	Name        string
-	Addr        string
-	Type        C.AdapterType
-	UDP         bool
-	XUDP        bool
-	TFO         bool
-	MPTCP       bool
-	Interface   string
-	RoutingMark int
-	Prefer      C.DNSPrefer
+	Name         string
+	Addr         string
+	Type         C.AdapterType
+	UDP          bool
+	XUDP         bool
+	TFO          bool
+	MPTCP        bool
+	Interface    string
+	RoutingMark  int
+	Prefer       C.DNSPrefer
+	ProviderName string
 }
 
 func NewBase(opt BaseOption) *Base {
@@ -213,6 +214,7 @@ func NewBase(opt BaseOption) *Base {
 		iface:  opt.Interface,
 		rmark:  opt.RoutingMark,
 		prefer: opt.Prefer,
+		pdName: opt.ProviderName,
 	}
 }
 
