@@ -48,6 +48,7 @@ const (
 	Masque
 	TrustTunnel
 	Tailscale
+	EasyTier
 )
 
 const (
@@ -221,6 +222,8 @@ func (at AdapterType) String() string {
 		return "TrustTunnel"
 	case Tailscale:
 		return "Tailscale"
+	case EasyTier:
+		return "EasyTier"
 	case Relay:
 		return "Relay"
 	case Selector:
