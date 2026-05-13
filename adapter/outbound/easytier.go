@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -183,7 +182,7 @@ func (e *EasyTier) ensureStarted(ctx context.Context) error {
 		e.waitCh <- cmd.Wait()
 	}()
 
-	log.Infoln("[EasyTier](%s) started pid=%d args=%s", e.Name(), cmd.Process.Pid, strings.Join(args, " "))
+	log.Infoln("[EasyTier](%s) started pid=%d args=%s", e.Name(), cmd.Process.Pid, easyTierArgsForLog(args))
 	if wait := e.option.startWait(); wait > 0 {
 		select {
 		case err := <-e.waitCh:
@@ -260,12 +259,16 @@ func (o EasyTierOption) commandArgs() []string {
 	return args
 }
 
-func (o EasyTierOption) commandString() string {
-	parts := append([]string{o.binary()}, o.commandArgs()...)
-	for i, part := range parts {
-		if strings.ContainsAny(part, " \t\n\r\"'") {
-			parts[i] = strconv.Quote(part)
+func easyTierArgsForLog(args []string) string {
+	masked := append([]string(nil), args...)
+	for i, arg := range masked {
+		if arg == "--network-secret" && i+1 < len(masked) {
+			masked[i+1] = "<redacted>"
+			continue
+		}
+		if strings.HasPrefix(arg, "--network-secret=") {
+			masked[i] = "--network-secret=<redacted>"
 		}
 	}
-	return strings.Join(parts, " ")
+	return strings.Join(masked, " ")
 }

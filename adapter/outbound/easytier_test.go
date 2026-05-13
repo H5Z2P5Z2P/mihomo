@@ -59,3 +59,14 @@ func TestEasyTierPeerListMergesPeerAndPeers(t *testing.T) {
 		t.Fatalf("unexpected peer list: got %#v want %#v", got, want)
 	}
 }
+
+func TestEasyTierArgsForLogRedactsSecret(t *testing.T) {
+	args := []string{"-p", "tcp://example.com:11010", "--network-secret", "secret-value", "--network-secret=second"}
+	want := "-p tcp://example.com:11010 --network-secret <redacted> --network-secret=<redacted>"
+	if got := easyTierArgsForLog(args); got != want {
+		t.Fatalf("unexpected masked args: got %q want %q", got, want)
+	}
+	if args[3] != "secret-value" {
+		t.Fatal("easyTierArgsForLog should not mutate input args")
+	}
+}
