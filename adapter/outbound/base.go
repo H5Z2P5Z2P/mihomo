@@ -355,6 +355,11 @@ type autoCloseProxyAdapter struct {
 	closeErr  error
 }
 
+type autoCloseL3ProxyAdapter struct {
+	*autoCloseProxyAdapter
+	l3ProxyAdapter C.L3ProxyAdapter
+}
+
 func (p *autoCloseProxyAdapter) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {
 	c, err := p.ProxyAdapter.DialContext(ctx, metadata)
 	if err != nil {
@@ -386,11 +391,28 @@ func (p *autoCloseProxyAdapter) Close() error {
 	return p.closeErr
 }
 
+func (p *autoCloseL3ProxyAdapter) ListenPacketContextL3(ctx context.Context, metadata *C.Metadata, writer C.L3PacketWriter) (_ C.L3PacketConn, err error) {
+	l3Conn, err := p.l3ProxyAdapter.ListenPacketContextL3(ctx, metadata, writer)
+	if err != nil {
+		return nil, err
+	}
+	if l3Conn, ok := l3Conn.(AddRef); ok {
+		l3Conn.AddRef(p)
+	}
+	return l3Conn, nil
+}
+
 func NewAutoCloseProxyAdapter(adapter ProxyAdapter) ProxyAdapter {
 	proxy := &autoCloseProxyAdapter{
 		ProxyAdapter: adapter,
 	}
 	// auto close ProxyAdapter
 	runtime.SetFinalizer(proxy, (*autoCloseProxyAdapter).Close)
+	if l3ProxyAdapter, ok := adapter.(C.L3ProxyAdapter); ok {
+		return &autoCloseL3ProxyAdapter{
+			autoCloseProxyAdapter: proxy,
+			l3ProxyAdapter:        l3ProxyAdapter,
+		}
+	}
 	return proxy
 }

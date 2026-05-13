@@ -12,11 +12,12 @@ import (
 
 type TunOption struct {
 	BaseOption
-	Device              string     `inbound:"device,omitempty"`
-	Stack               C.TUNStack `inbound:"stack,omitempty"`
-	DNSHijack           []string   `inbound:"dns-hijack,omitempty"`
-	AutoRoute           bool       `inbound:"auto-route,omitempty"`
-	AutoDetectInterface bool       `inbound:"auto-detect-interface,omitempty"`
+	Device              string             `inbound:"device,omitempty"`
+	Stack               C.TUNStack         `inbound:"stack,omitempty"`
+	DNSHijack           []string           `inbound:"dns-hijack,omitempty"`
+	AutoRoute           bool               `inbound:"auto-route,omitempty"`
+	AutoDetectInterface bool               `inbound:"auto-detect-interface,omitempty"`
+	ICMPRoutingMode     LC.ICMPRoutingMode `inbound:"icmp-route-mode,omitempty"`
 
 	MTU                                   uint32         `inbound:"mtu,omitempty"`
 	GSO                                   bool           `inbound:"gso,omitempty"`
@@ -93,6 +94,7 @@ func NewTun(options *TunOption) (*Tun, error) {
 			DNSHijack:                             options.DNSHijack,
 			AutoRoute:                             options.AutoRoute,
 			AutoDetectInterface:                   options.AutoDetectInterface,
+			ICMPRoutingMode:                       options.ICMPRoutingMode,
 			MTU:                                   options.MTU,
 			GSO:                                   options.GSO,
 			GSOMaxSize:                            options.GSOMaxSize,

@@ -265,12 +265,13 @@ type RawNTP struct {
 }
 
 type RawTun struct {
-	Enable              bool       `yaml:"enable" json:"enable"`
-	Device              string     `yaml:"device" json:"device"`
-	Stack               C.TUNStack `yaml:"stack" json:"stack"`
-	DNSHijack           []string   `yaml:"dns-hijack" json:"dns-hijack"`
-	AutoRoute           bool       `yaml:"auto-route" json:"auto-route"`
-	AutoDetectInterface bool       `yaml:"auto-detect-interface"`
+	Enable              bool               `yaml:"enable" json:"enable"`
+	Device              string             `yaml:"device" json:"device"`
+	Stack               C.TUNStack         `yaml:"stack" json:"stack"`
+	DNSHijack           []string           `yaml:"dns-hijack" json:"dns-hijack"`
+	AutoRoute           bool               `yaml:"auto-route" json:"auto-route"`
+	AutoDetectInterface bool               `yaml:"auto-detect-interface"`
+	ICMPRoutingMode     LC.ICMPRoutingMode `yaml:"icmp-route-mode" json:"icmp-route-mode,omitempty"`
 
 	MTU        uint32 `yaml:"mtu" json:"mtu,omitempty"`
 	GSO        bool   `yaml:"gso" json:"gso,omitempty"`
@@ -1641,6 +1642,10 @@ func parseTun(rawTun RawTun, dns *DNS, general *General) error {
 		tunAddressPrefix = netip.MustParsePrefix("198.18.0.1/16")
 	}
 	tunAddressPrefix = netip.PrefixFrom(tunAddressPrefix.Addr(), 30)
+	icmpRoutingMode, err := LC.ParseICMPRoutingMode(rawTun.ICMPRoutingMode)
+	if err != nil {
+		return err
+	}
 
 	general.Tun = LC.Tun{
 		Enable:              rawTun.Enable,
@@ -1649,6 +1654,7 @@ func parseTun(rawTun RawTun, dns *DNS, general *General) error {
 		DNSHijack:           rawTun.DNSHijack,
 		AutoRoute:           rawTun.AutoRoute,
 		AutoDetectInterface: rawTun.AutoDetectInterface,
+		ICMPRoutingMode:     icmpRoutingMode,
 
 		MTU:                                   rawTun.MTU,
 		GSO:                                   rawTun.GSO,

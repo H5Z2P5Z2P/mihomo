@@ -1,7 +1,9 @@
 package config
 
 import (
+	"fmt"
 	"net/netip"
+	"strings"
 
 	C "github.com/metacubex/mihomo/constant"
 
@@ -9,13 +11,35 @@ import (
 	"golang.org/x/exp/slices"
 )
 
+type ICMPRoutingMode string
+
+const (
+	ICMPRoutingModeProxy    ICMPRoutingMode = "proxy"
+	ICMPRoutingModeEasyTier ICMPRoutingMode = "easytier"
+	ICMPRoutingModeDirect   ICMPRoutingMode = "direct"
+)
+
+func ParseICMPRoutingMode(mode ICMPRoutingMode) (ICMPRoutingMode, error) {
+	switch normalized := ICMPRoutingMode(strings.ToLower(strings.TrimSpace(string(mode)))); normalized {
+	case "", ICMPRoutingModeProxy:
+		return ICMPRoutingModeProxy, nil
+	case ICMPRoutingModeEasyTier:
+		return ICMPRoutingModeEasyTier, nil
+	case ICMPRoutingModeDirect:
+		return ICMPRoutingModeDirect, nil
+	default:
+		return "", fmt.Errorf("invalid tun icmp-route-mode: %s", mode)
+	}
+}
+
 type Tun struct {
-	Enable              bool       `yaml:"enable" json:"enable"`
-	Device              string     `yaml:"device" json:"device"`
-	Stack               C.TUNStack `yaml:"stack" json:"stack"`
-	DNSHijack           []string   `yaml:"dns-hijack" json:"dns-hijack"`
-	AutoRoute           bool       `yaml:"auto-route" json:"auto-route"`
-	AutoDetectInterface bool       `yaml:"auto-detect-interface" json:"auto-detect-interface"`
+	Enable              bool            `yaml:"enable" json:"enable"`
+	Device              string          `yaml:"device" json:"device"`
+	Stack               C.TUNStack      `yaml:"stack" json:"stack"`
+	DNSHijack           []string        `yaml:"dns-hijack" json:"dns-hijack"`
+	AutoRoute           bool            `yaml:"auto-route" json:"auto-route"`
+	AutoDetectInterface bool            `yaml:"auto-detect-interface" json:"auto-detect-interface"`
+	ICMPRoutingMode     ICMPRoutingMode `yaml:"icmp-route-mode" json:"icmp-route-mode,omitempty"`
 
 	MTU                                   uint32         `yaml:"mtu" json:"mtu,omitempty"`
 	GSO                                   bool           `yaml:"gso" json:"gso,omitempty"`
@@ -104,6 +128,9 @@ func (t *Tun) Equal(other Tun) bool {
 		return false
 	}
 	if t.AutoDetectInterface != other.AutoDetectInterface {
+		return false
+	}
+	if t.ICMPRoutingMode != other.ICMPRoutingMode {
 		return false
 	}
 

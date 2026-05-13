@@ -72,10 +72,15 @@ type tunnel struct{}
 var Tunnel = tunnel{}
 var _ C.Tunnel = Tunnel
 var _ P.Tunnel = Tunnel
+var _ C.MetadataResolver = Tunnel
 
 func (t tunnel) HandleTCPConn(conn net.Conn, metadata *C.Metadata) {
 	connCtx := icontext.NewConnContext(conn, metadata)
 	handleTCPConn(connCtx)
+}
+
+func (t tunnel) ResolveMetadata(metadata *C.Metadata) (C.Proxy, C.Rule, error) {
+	return resolveMetadata(metadata)
 }
 
 func initUDP() {
@@ -317,7 +322,7 @@ func resolveMetadata(metadata *C.Metadata) (proxy C.Proxy, rule C.Rule, err erro
 	}
 	var (
 		resolved             bool
-		attemptProcessLookup = metadata.Type != C.INNER
+		attemptProcessLookup = metadata.Type != C.INNER && metadata.NetWork != C.ICMP
 	)
 
 	if node, ok := resolver.DefaultHosts.Search(metadata.Host, false); ok {

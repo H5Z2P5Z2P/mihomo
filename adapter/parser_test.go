@@ -32,18 +32,16 @@ func TestParseTailscaleProxy(t *testing.T) {
 }
 
 func TestParseEasyTierProxy(t *testing.T) {
-	autoStart := false
 	proxy, err := ParseProxy(map[string]any{
-		"name":           "et-main",
-		"type":           "easytier",
-		"binary":         "/usr/local/bin/easytier-core",
-		"peer":           "tcp://op.uily.de:23980",
-		"ipv4":           "192.88.99.3",
-		"network-name":   "boom",
-		"network-secret": "luncheon-splendid-tinsmith-reformat-engraving-spending",
-		"no-listener":    true,
-		"manual-routes":  []string{"192.168.50.1/32"},
-		"auto-start":     autoStart,
+		"name":               "et-main",
+		"type":               "easytier",
+		"peer":               "tcp://peer.example.com:11010",
+		"ipv4":               "198.51.100.11",
+		"network-name":       "example-net",
+		"network-secret":     "example-network-secret",
+		"no-listener":        true,
+		"manual-routes":      []string{"203.0.113.1/32"},
+		"disable-encryption": false,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -56,5 +54,8 @@ func TestParseEasyTierProxy(t *testing.T) {
 	}
 	if !proxy.SupportUDP() {
 		t.Fatal("easytier proxy should advertise UDP support")
+	}
+	if _, ok := proxy.Adapter().(C.L3ProxyAdapter); !ok {
+		t.Fatal("easytier proxy should support L3 packet forwarding")
 	}
 }

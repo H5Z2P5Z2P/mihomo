@@ -73,6 +73,7 @@ type ListenerHandler struct {
 	Inet4Address          []netip.Prefix
 	Inet6Address          []netip.Prefix
 	DisableICMPForwarding bool
+	ICMPRoutingMode       LC.ICMPRoutingMode
 }
 
 var emptyAddressSet = []*netipx.IPSet{{}}
@@ -294,6 +295,7 @@ func New(options LC.Tun, tunnel C.Tunnel, additions ...inbound.Addition) (l *Lis
 		Inet4Address:          options.Inet4Address,
 		Inet6Address:          options.Inet6Address,
 		DisableICMPForwarding: options.DisableICMPForwarding,
+		ICMPRoutingMode:       options.ICMPRoutingMode,
 	}
 	l = &Listener{
 		closed:  false,

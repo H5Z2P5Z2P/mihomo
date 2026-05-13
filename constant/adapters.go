@@ -101,6 +101,16 @@ type PacketConn interface {
 	ResolveUDP(ctx context.Context, metadata *Metadata) error
 }
 
+type L3PacketWriter interface {
+	WritePacket(packet []byte) error
+}
+
+type L3PacketConn interface {
+	WritePacket(packet []byte) error
+	Close() error
+	IsClosed() bool
+}
+
 type Dialer interface {
 	DialContext(ctx context.Context, network, address string) (net.Conn, error)
 	ListenPacket(ctx context.Context, network, address string, rAddrPort netip.AddrPort) (net.PacketConn, error)
@@ -143,6 +153,14 @@ type ProxyAdapter interface {
 
 	// Close releasing associated resources
 	Close() error
+}
+
+type L3ProxyAdapter interface {
+	ListenPacketContextL3(ctx context.Context, metadata *Metadata, writer L3PacketWriter) (L3PacketConn, error)
+}
+
+type MetadataResolver interface {
+	ResolveMetadata(metadata *Metadata) (Proxy, Rule, error)
 }
 
 type DelayHistory struct {
