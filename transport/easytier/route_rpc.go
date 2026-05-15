@@ -26,6 +26,8 @@ type routeRPCConfig struct {
 	PeerRouteID  uint64
 	InstanceID   [4]uint32
 	ProxyCIDRs   []string
+	PeerInfos    []routePeerInfo
+	ConnInfos    []routeConnInfo
 	Transaction  int64
 }
 
@@ -48,13 +50,44 @@ type rpcPacket struct {
 type syncRouteInfo struct {
 	MyPeerID  uint32
 	PeerInfos []routePeerInfo
+	ConnInfos []routeConnInfo
 }
 
 type routePeerInfo struct {
 	PeerID        uint32
+	Cost          uint32
 	IPv4          netip.Addr
 	NetworkLength int
 	ProxyCIDRs    []netip.Prefix
+	Hostname      string
+	UDPNATType    uint32
+	TCPNATType    uint32
+	FeatureFlags  peerFeatureFlags
+	PeerRouteID   uint64
+	IPv6          netip.Addr
+	RelayPeerID   uint32
+	Version       uint32
+	Raw           []byte
+}
+
+type routeConnInfo struct {
+	PeerID           uint32
+	ConnectedPeerIDs []uint32
+	Version          uint32
+}
+
+type peerFeatureFlags struct {
+	IsPublicServer         bool
+	AvoidRelayData         bool
+	KCPInput               bool
+	NoRelayKCP             bool
+	SupportConnListSync    bool
+	QUICInput              bool
+	NoRelayQUIC            bool
+	IsCredentialPeer       bool
+	NeedP2P                bool
+	DisableP2P             bool
+	IPv6PublicAddrProvider bool
 }
 
 type protoField struct {
@@ -112,12 +145,15 @@ func buildSyncRouteInfoRequest(config routeRPCConfig) ([]byte, error) {
 		return nil, err
 	}
 	peerInfos := appendProtoBytes(nil, 1, peerInfo)
+	for _, info := range config.PeerInfos {
+		payload, err := buildStoredRoutePeerInfo(info)
+		if err != nil {
+			return nil, err
+		}
+		peerInfos = appendProtoBytes(peerInfos, 1, payload)
+	}
 
-	peerIDVersion := appendProtoVarint(nil, 1, uint64(config.MyPeerID))
-	peerIDVersion = appendProtoVarint(peerIDVersion, 2, 1)
-	connPeerInfo := appendProtoBytes(nil, 1, peerIDVersion)
-	connPeerInfo = appendProtoVarint(connPeerInfo, 2, uint64(config.RemotePeerID))
-	connPeerList := appendProtoBytes(nil, 1, connPeerInfo)
+	connPeerList := buildRouteConnPeerList(config)
 
 	request := appendProtoVarint(nil, 1, uint64(config.MyPeerID))
 	request = appendProtoVarint(request, 2, config.SessionID)
@@ -126,6 +162,125 @@ func buildSyncRouteInfoRequest(config routeRPCConfig) ([]byte, error) {
 	request = appendProtoBytes(request, 4, peerInfos)
 	request = appendProtoBytes(request, 7, connPeerList)
 	return request, nil
+}
+
+func buildRouteConnPeerList(config routeRPCConfig) []byte {
+	connInfos := config.ConnInfos
+	if len(connInfos) == 0 {
+		connInfos = []routeConnInfo{{
+			PeerID:           config.MyPeerID,
+			ConnectedPeerIDs: []uint32{config.RemotePeerID},
+			Version:          1,
+		}}
+	}
+	var connPeerList []byte
+	for _, info := range connInfos {
+		if info.PeerID == 0 || info.Version == 0 {
+			continue
+		}
+		peerIDVersion := appendProtoVarint(nil, 1, uint64(info.PeerID))
+		peerIDVersion = appendProtoVarint(peerIDVersion, 2, uint64(info.Version))
+		connPeerInfo := appendProtoBytes(nil, 1, peerIDVersion)
+		for _, connectedPeerID := range info.ConnectedPeerIDs {
+			if connectedPeerID != 0 {
+				connPeerInfo = appendProtoVarint(connPeerInfo, 2, uint64(connectedPeerID))
+			}
+		}
+		connPeerList = appendProtoBytes(connPeerList, 1, connPeerInfo)
+	}
+	return connPeerList
+}
+
+func buildStoredRoutePeerInfo(info routePeerInfo) ([]byte, error) {
+	if len(info.Raw) > 0 {
+		return append([]byte(nil), info.Raw...), nil
+	}
+	payload := appendProtoVarint(nil, 1, uint64(info.PeerID))
+	if info.IPv4.IsValid() {
+		addr4 := info.IPv4.As4()
+		ipv4 := appendProtoVarint(nil, 1, uint64(binary.BigEndian.Uint32(addr4[:])))
+		payload = appendProtoBytes(payload, 4, ipv4)
+	}
+	for _, prefix := range info.ProxyCIDRs {
+		payload = appendProtoBytes(payload, 5, []byte(prefix.String()))
+	}
+	if info.Cost != 0 {
+		payload = appendProtoVarint(payload, 3, uint64(info.Cost))
+	}
+	if info.Hostname != "" {
+		payload = appendProtoBytes(payload, 6, []byte(info.Hostname))
+	}
+	if info.UDPNATType != 0 {
+		payload = appendProtoVarint(payload, 7, uint64(info.UDPNATType))
+	}
+	payload = appendProtoVarint(payload, 9, uint64(info.Version))
+	if hasPeerFeatureFlags(info.FeatureFlags) {
+		payload = appendProtoBytes(payload, 11, buildPeerFeatureFlags(info.FeatureFlags))
+	}
+	if info.PeerRouteID != 0 {
+		payload = appendProtoVarint(payload, 12, info.PeerRouteID)
+	}
+	if info.NetworkLength > 0 {
+		payload = appendProtoVarint(payload, 13, uint64(info.NetworkLength))
+	}
+	if info.IPv6.IsValid() {
+		payload = appendProtoBytes(payload, 15, buildProtoIPv6Inet(info.IPv6))
+	}
+	if info.TCPNATType != 0 {
+		payload = appendProtoVarint(payload, 17, uint64(info.TCPNATType))
+	}
+	return payload, nil
+}
+
+func hasPeerFeatureFlags(flags peerFeatureFlags) bool {
+	return flags.IsPublicServer || flags.AvoidRelayData || flags.KCPInput || flags.NoRelayKCP || flags.SupportConnListSync || flags.QUICInput || flags.NoRelayQUIC || flags.IsCredentialPeer || flags.NeedP2P || flags.DisableP2P || flags.IPv6PublicAddrProvider
+}
+
+func buildPeerFeatureFlags(flags peerFeatureFlags) []byte {
+	var payload []byte
+	if flags.IsPublicServer {
+		payload = appendProtoVarint(payload, 1, 1)
+	}
+	if flags.AvoidRelayData {
+		payload = appendProtoVarint(payload, 2, 1)
+	}
+	if flags.KCPInput {
+		payload = appendProtoVarint(payload, 3, 1)
+	}
+	if flags.NoRelayKCP {
+		payload = appendProtoVarint(payload, 4, 1)
+	}
+	if flags.SupportConnListSync {
+		payload = appendProtoVarint(payload, 5, 1)
+	}
+	if flags.QUICInput {
+		payload = appendProtoVarint(payload, 6, 1)
+	}
+	if flags.NoRelayQUIC {
+		payload = appendProtoVarint(payload, 7, 1)
+	}
+	if flags.IsCredentialPeer {
+		payload = appendProtoVarint(payload, 8, 1)
+	}
+	if flags.NeedP2P {
+		payload = appendProtoVarint(payload, 9, 1)
+	}
+	if flags.DisableP2P {
+		payload = appendProtoVarint(payload, 10, 1)
+	}
+	if flags.IPv6PublicAddrProvider {
+		payload = appendProtoVarint(payload, 11, 1)
+	}
+	return payload
+}
+
+func buildProtoIPv6Inet(addr netip.Addr) []byte {
+	addr16 := addr.As16()
+	ipv6 := appendProtoVarint(nil, 1, uint64(binary.BigEndian.Uint32(addr16[0:4])))
+	ipv6 = appendProtoVarint(ipv6, 2, uint64(binary.BigEndian.Uint32(addr16[4:8])))
+	ipv6 = appendProtoVarint(ipv6, 3, uint64(binary.BigEndian.Uint32(addr16[8:12])))
+	ipv6 = appendProtoVarint(ipv6, 4, uint64(binary.BigEndian.Uint32(addr16[12:16])))
+	return appendProtoBytes(nil, 1, ipv6)
 }
 
 func buildRoutePeerInfo(config routeRPCConfig) ([]byte, error) {
@@ -154,7 +309,7 @@ func buildRoutePeerInfo(config routeRPCConfig) ([]byte, error) {
 	}
 	info = appendProtoVarint(info, 9, 1)
 	info = appendProtoBytes(info, 10, []byte("mihomo"))
-	info = appendProtoBytes(info, 11, nil)
+	info = appendProtoBytes(info, 11, buildPeerFeatureFlags(peerFeatureFlags{SupportConnListSync: true}))
 	info = appendProtoVarint(info, 12, config.PeerRouteID)
 	info = appendProtoVarint(info, 13, uint64(config.IPv4.Bits()))
 	return info, nil
@@ -261,6 +416,14 @@ func parseRouteSyncRPCRequest(packet rpcPacket) (syncRouteInfo, error) {
 	return parseSyncRouteInfoRequest(request)
 }
 
+func rawRoutePeerInfoPayloads(packet rpcPacket) ([][]byte, error) {
+	request, err := parseRPCRequestBody(packet.Body)
+	if err != nil {
+		return nil, err
+	}
+	return extractRawRoutePeerInfoPayloads(request)
+}
+
 func parseRPCRequestBody(payload []byte) ([]byte, error) {
 	for len(payload) > 0 {
 		field, rest, err := consumeProtoField(payload)
@@ -292,9 +455,141 @@ func parseSyncRouteInfoRequest(payload []byte) (syncRouteInfo, error) {
 				return info, err
 			}
 			info.PeerInfos = peerInfos
+		case field.Number == 5 && field.WireType == 2:
+			connInfos, err := parseRouteConnBitmap(field.Bytes)
+			if err != nil {
+				return info, err
+			}
+			info.ConnInfos = connInfos
+		case field.Number == 7 && field.WireType == 2:
+			connInfos, err := parseRouteConnPeerList(field.Bytes)
+			if err != nil {
+				return info, err
+			}
+			info.ConnInfos = connInfos
 		}
 	}
 	return info, nil
+}
+
+func parseRouteConnPeerList(payload []byte) ([]routeConnInfo, error) {
+	var infos []routeConnInfo
+	for len(payload) > 0 {
+		field, rest, err := consumeProtoField(payload)
+		if err != nil {
+			return nil, err
+		}
+		payload = rest
+		if field.Number != 1 || field.WireType != 2 {
+			continue
+		}
+		info, err := parsePeerConnInfo(field.Bytes)
+		if err != nil {
+			return nil, err
+		}
+		if info.PeerID != 0 {
+			infos = append(infos, info)
+		}
+	}
+	return infos, nil
+}
+
+func parsePeerConnInfo(payload []byte) (routeConnInfo, error) {
+	var info routeConnInfo
+	for len(payload) > 0 {
+		field, rest, err := consumeProtoField(payload)
+		if err != nil {
+			return info, err
+		}
+		payload = rest
+		switch {
+		case field.Number == 1 && field.WireType == 2:
+			peerID, version, err := parsePeerIDVersion(field.Bytes)
+			if err != nil {
+				return info, err
+			}
+			info.PeerID = peerID
+			info.Version = version
+		case field.Number == 2 && field.WireType == 0:
+			info.ConnectedPeerIDs = append(info.ConnectedPeerIDs, uint32(field.Varint))
+		}
+	}
+	return info, nil
+}
+
+func parseRouteConnBitmap(payload []byte) ([]routeConnInfo, error) {
+	var peerVersions []routeConnInfo
+	var bitmap []byte
+	for len(payload) > 0 {
+		field, rest, err := consumeProtoField(payload)
+		if err != nil {
+			return nil, err
+		}
+		payload = rest
+		switch {
+		case field.Number == 1 && field.WireType == 2:
+			peerID, version, err := parsePeerIDVersion(field.Bytes)
+			if err != nil {
+				return nil, err
+			}
+			if peerID != 0 {
+				peerVersions = append(peerVersions, routeConnInfo{PeerID: peerID, Version: version})
+			}
+		case field.Number == 2 && field.WireType == 2:
+			bitmap = append(bitmap[:0], field.Bytes...)
+		}
+	}
+	for peerIdx := range peerVersions {
+		for otherIdx, other := range peerVersions {
+			if routeConnBitmapBit(bitmap, peerIdx*len(peerVersions)+otherIdx) {
+				peerVersions[peerIdx].ConnectedPeerIDs = append(peerVersions[peerIdx].ConnectedPeerIDs, other.PeerID)
+			}
+		}
+	}
+	return peerVersions, nil
+}
+
+func parsePeerIDVersion(payload []byte) (uint32, uint32, error) {
+	var peerID, version uint32
+	for len(payload) > 0 {
+		field, rest, err := consumeProtoField(payload)
+		if err != nil {
+			return 0, 0, err
+		}
+		payload = rest
+		if field.WireType != 0 {
+			continue
+		}
+		switch field.Number {
+		case 1:
+			peerID = uint32(field.Varint)
+		case 2:
+			version = uint32(field.Varint)
+		}
+	}
+	return peerID, version, nil
+}
+
+func routeConnBitmapBit(bitmap []byte, bitIdx int) bool {
+	byteIdx := bitIdx / 8
+	if byteIdx < 0 || byteIdx >= len(bitmap) {
+		return false
+	}
+	return bitmap[byteIdx]&(1<<uint(bitIdx%8)) != 0
+}
+
+func extractRawRoutePeerInfoPayloads(payload []byte) ([][]byte, error) {
+	for len(payload) > 0 {
+		field, rest, err := consumeProtoField(payload)
+		if err != nil {
+			return nil, err
+		}
+		payload = rest
+		if field.Number == 4 && field.WireType == 2 {
+			return extractRawRoutePeerInfos(field.Bytes)
+		}
+	}
+	return nil, nil
 }
 
 func parseRoutePeerInfos(payload []byte) ([]routePeerInfo, error) {
@@ -319,8 +614,24 @@ func parseRoutePeerInfos(payload []byte) ([]routePeerInfo, error) {
 	return infos, nil
 }
 
+func extractRawRoutePeerInfos(payload []byte) ([][]byte, error) {
+	var infos [][]byte
+	for len(payload) > 0 {
+		field, rest, err := consumeProtoField(payload)
+		if err != nil {
+			return nil, err
+		}
+		payload = rest
+		if field.Number != 1 || field.WireType != 2 {
+			continue
+		}
+		infos = append(infos, append([]byte(nil), field.Bytes...))
+	}
+	return infos, nil
+}
+
 func parseRoutePeerInfo(payload []byte) (routePeerInfo, error) {
-	var info routePeerInfo
+	info := routePeerInfo{Raw: append([]byte(nil), payload...)}
 	for len(payload) > 0 {
 		field, rest, err := consumeProtoField(payload)
 		if err != nil {
@@ -330,6 +641,8 @@ func parseRoutePeerInfo(payload []byte) (routePeerInfo, error) {
 		switch {
 		case field.Number == 1 && field.WireType == 0:
 			info.PeerID = uint32(field.Varint)
+		case field.Number == 3 && field.WireType == 0:
+			info.Cost = uint32(field.Varint)
 		case field.Number == 4 && field.WireType == 2:
 			addr, err := parseProtoIPv4Addr(field.Bytes)
 			if err != nil {
@@ -341,11 +654,110 @@ func parseRoutePeerInfo(payload []byte) (routePeerInfo, error) {
 			if err == nil {
 				info.ProxyCIDRs = append(info.ProxyCIDRs, prefix)
 			}
+		case field.Number == 6 && field.WireType == 2:
+			info.Hostname = string(field.Bytes)
+		case field.Number == 7 && field.WireType == 0:
+			info.UDPNATType = uint32(field.Varint)
 		case field.Number == 13 && field.WireType == 0:
 			info.NetworkLength = int(field.Varint)
+		case field.Number == 9 && field.WireType == 0:
+			info.Version = uint32(field.Varint)
+		case field.Number == 10 && field.WireType == 2:
+			// easytier_version currently unused by mihomo lightweight client.
+		case field.Number == 11 && field.WireType == 2:
+			info.FeatureFlags = parsePeerFeatureFlags(field.Bytes)
+		case field.Number == 12 && field.WireType == 0:
+			info.PeerRouteID = field.Varint
+		case field.Number == 15 && field.WireType == 2:
+			addr, err := parseProtoIPv6Inet(field.Bytes)
+			if err == nil {
+				info.IPv6 = addr
+			}
+		case field.Number == 17 && field.WireType == 0:
+			info.TCPNATType = uint32(field.Varint)
 		}
 	}
 	return info, nil
+}
+
+func parsePeerFeatureFlags(payload []byte) peerFeatureFlags {
+	var flags peerFeatureFlags
+	for len(payload) > 0 {
+		field, rest, err := consumeProtoField(payload)
+		if err != nil {
+			return flags
+		}
+		payload = rest
+		if field.WireType != 0 {
+			continue
+		}
+		value := field.Varint != 0
+		switch field.Number {
+		case 1:
+			flags.IsPublicServer = value
+		case 2:
+			flags.AvoidRelayData = value
+		case 3:
+			flags.KCPInput = value
+		case 4:
+			flags.NoRelayKCP = value
+		case 5:
+			flags.SupportConnListSync = value
+		case 6:
+			flags.QUICInput = value
+		case 7:
+			flags.NoRelayQUIC = value
+		case 8:
+			flags.IsCredentialPeer = value
+		case 9:
+			flags.NeedP2P = value
+		case 10:
+			flags.DisableP2P = value
+		case 11:
+			flags.IPv6PublicAddrProvider = value
+		}
+	}
+	return flags
+}
+
+func parseProtoIPv6Inet(payload []byte) (netip.Addr, error) {
+	for len(payload) > 0 {
+		field, rest, err := consumeProtoField(payload)
+		if err != nil {
+			return netip.Addr{}, err
+		}
+		payload = rest
+		if field.Number != 1 || field.WireType != 2 {
+			continue
+		}
+		return parseProtoIPv6Addr(field.Bytes)
+	}
+	return netip.Addr{}, fmt.Errorf("%w: missing ipv6 address", ErrInvalidPacket)
+}
+
+func parseProtoIPv6Addr(payload []byte) (netip.Addr, error) {
+	var parts [4]uint32
+	for len(payload) > 0 {
+		field, rest, err := consumeProtoField(payload)
+		if err != nil {
+			return netip.Addr{}, err
+		}
+		payload = rest
+		if field.Number < 1 || field.Number > 4 || field.WireType != 0 {
+			continue
+		}
+		parts[field.Number-1] = uint32(field.Varint)
+	}
+	var bytes [16]byte
+	binary.BigEndian.PutUint32(bytes[0:4], parts[0])
+	binary.BigEndian.PutUint32(bytes[4:8], parts[1])
+	binary.BigEndian.PutUint32(bytes[8:12], parts[2])
+	binary.BigEndian.PutUint32(bytes[12:16], parts[3])
+	addr := netip.AddrFrom16(bytes)
+	if !addr.IsValid() {
+		return netip.Addr{}, fmt.Errorf("%w: invalid ipv6 address", ErrInvalidPacket)
+	}
+	return addr, nil
 }
 
 func parseProtoIPv4Addr(payload []byte) (netip.Addr, error) {

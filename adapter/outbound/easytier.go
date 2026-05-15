@@ -2,6 +2,7 @@ package outbound
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -27,9 +28,11 @@ type EasyTierOption struct {
 	Peers             []string `proxy:"peers,omitempty"`
 	IPv4              string   `proxy:"ipv4,omitempty"`
 	IPv6              string   `proxy:"ipv6,omitempty"`
+	Hostname          string   `proxy:"hostname,omitempty"`
 	NetworkName       string   `proxy:"network-name,omitempty"`
 	NetworkSecret     string   `proxy:"network-secret,omitempty"`
 	MTU               int      `proxy:"mtu,omitempty"`
+	LatencyFirst      bool     `proxy:"latency-first,omitempty"`
 	UDP               bool     `proxy:"udp,omitempty"`
 	NoListener        bool     `proxy:"no-listener,omitempty"`
 	DisableEncryption bool     `proxy:"disable-encryption,omitempty"`
@@ -64,9 +67,11 @@ func NewEasyTier(option EasyTierOption) (*EasyTier, error) {
 		Peers:             peers,
 		IPv4:              option.IPv4,
 		IPv6:              option.IPv6,
+		Hostname:          option.Hostname,
 		NetworkName:       option.NetworkName,
 		NetworkSecret:     option.NetworkSecret,
 		MTU:               option.MTU,
+		LatencyFirst:      option.LatencyFirst,
 		DisableEncryption: option.DisableEncryption,
 		ManualRoutes:      option.ManualRoutes,
 	}, outbound.dialer)
@@ -128,6 +133,47 @@ func (e *EasyTier) Close() error {
 		return e.client.Close()
 	}
 	return nil
+}
+
+func (e *EasyTier) DebugSnapshot() et.DebugSnapshot {
+	if e == nil || e.client == nil {
+		return et.DebugSnapshot{}
+	}
+	return e.client.DebugSnapshot()
+}
+
+func (e *EasyTier) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		ID            string           `json:"id"`
+		Name          string           `json:"name"`
+		Type          string           `json:"type"`
+		AdapterType   C.AdapterType    `json:"adapterType"`
+		Addr          string           `json:"addr"`
+		SupportUDP    bool             `json:"supportUDP"`
+		XUDP          bool             `json:"xudp"`
+		TFO           bool             `json:"tfo"`
+		MPTCP         bool             `json:"mptcp"`
+		Interface     string           `json:"interface,omitempty"`
+		RoutingMark   int              `json:"routingMark,omitempty"`
+		ProviderName  string           `json:"providerName,omitempty"`
+		Option        EasyTierOption   `json:"option"`
+		DebugSnapshot et.DebugSnapshot `json:"debugSnapshot"`
+	}{
+		ID:            e.Id(),
+		Name:          e.Name(),
+		Type:          e.Type().String(),
+		AdapterType:   e.Type(),
+		Addr:          e.Addr(),
+		SupportUDP:    e.SupportUDP(),
+		XUDP:          e.ProxyInfo().XUDP,
+		TFO:           e.ProxyInfo().TFO,
+		MPTCP:         e.ProxyInfo().MPTCP,
+		Interface:     e.ProxyInfo().Interface,
+		RoutingMark:   e.ProxyInfo().RoutingMark,
+		ProviderName:  e.ProxyInfo().ProviderName,
+		Option:        e.option,
+		DebugSnapshot: e.DebugSnapshot(),
+	})
 }
 
 func (e *EasyTier) resolve(ctx context.Context, metadata *C.Metadata) error {

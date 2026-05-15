@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"encoding/json"
 	"testing"
 
 	C "github.com/metacubex/mihomo/constant"
@@ -37,8 +38,10 @@ func TestParseEasyTierProxy(t *testing.T) {
 		"type":               "easytier",
 		"peer":               "tcp://peer.example.com:11010",
 		"ipv4":               "198.51.100.11",
+		"hostname":           "et-main-host",
 		"network-name":       "example-net",
 		"network-secret":     "example-network-secret",
+		"latency-first":      true,
 		"no-listener":        true,
 		"manual-routes":      []string{"203.0.113.1/32"},
 		"disable-encryption": false,
@@ -57,5 +60,20 @@ func TestParseEasyTierProxy(t *testing.T) {
 	}
 	if _, ok := proxy.Adapter().(C.L3ProxyAdapter); !ok {
 		t.Fatal("easytier proxy should support L3 packet forwarding")
+	}
+	body, err := proxy.Adapter().MarshalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Option struct {
+			Hostname string `json:"hostname"`
+		} `json:"option"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Option.Hostname != "et-main-host" {
+		t.Fatalf("unexpected parsed hostname: %s", payload.Option.Hostname)
 	}
 }

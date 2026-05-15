@@ -22,7 +22,8 @@ const (
 	DefaultTCPPort = "11010"
 	DefaultMTU     = 1380
 
-	flagEncrypted = 0b0000_0001
+	flagEncrypted    = 0b0000_0001
+	flagLatencyFirst = 0b0000_0010
 )
 
 type PacketType uint8
@@ -58,11 +59,23 @@ func (h PeerManagerHeader) IsEncrypted() bool {
 	return h.Flags&flagEncrypted != 0
 }
 
+func (h PeerManagerHeader) IsLatencyFirst() bool {
+	return h.Flags&flagLatencyFirst != 0
+}
+
 func (h *PeerManagerHeader) SetEncrypted(encrypted bool) {
 	if encrypted {
 		h.Flags |= flagEncrypted
 	} else {
 		h.Flags &^= flagEncrypted
+	}
+}
+
+func (h *PeerManagerHeader) SetLatencyFirst(latencyFirst bool) {
+	if latencyFirst {
+		h.Flags |= flagLatencyFirst
+	} else {
+		h.Flags &^= flagLatencyFirst
 	}
 }
 
@@ -100,7 +113,16 @@ func ReadTCPPacket(r io.Reader, maxPacketSize int) (*Packet, error) {
 	if _, err := io.ReadFull(r, body); err != nil {
 		return nil, err
 	}
+	return ReadPacketBody(body, maxPacketSize)
+}
 
+func ReadPacketBody(body []byte, maxPacketSize int) (*Packet, error) {
+	if len(body) < PeerManagerHeaderSize {
+		return nil, fmt.Errorf("%w: body too short", ErrInvalidPacket)
+	}
+	if maxPacketSize > 0 && len(body) > maxPacketSize {
+		return nil, fmt.Errorf("%w: body too long", ErrInvalidPacket)
+	}
 	packet := &Packet{
 		Header: PeerManagerHeader{
 			FromPeerID:     binary.LittleEndian.Uint32(body[0:4]),
@@ -116,19 +138,26 @@ func ReadTCPPacket(r io.Reader, maxPacketSize int) (*Packet, error) {
 }
 
 func (p *Packet) MarshalTCP() []byte {
+	body := p.MarshalBody()
+	buf := make([]byte, TCPTunnelHeaderSize+len(body))
+	binary.LittleEndian.PutUint32(buf[0:4], uint32(len(body)))
+	copy(buf[4:], body)
+	return buf
+}
+
+func (p *Packet) MarshalBody() []byte {
 	bodyLen := PeerManagerHeaderSize + len(p.Payload)
-	buf := make([]byte, TCPTunnelHeaderSize+bodyLen)
-	binary.LittleEndian.PutUint32(buf[0:4], uint32(bodyLen))
-	binary.LittleEndian.PutUint32(buf[4:8], p.Header.FromPeerID)
-	binary.LittleEndian.PutUint32(buf[8:12], p.Header.ToPeerID)
-	buf[12] = byte(p.Header.PacketType)
-	buf[13] = p.Header.Flags
-	buf[14] = p.Header.ForwardCounter
+	buf := make([]byte, bodyLen)
+	binary.LittleEndian.PutUint32(buf[0:4], p.Header.FromPeerID)
+	binary.LittleEndian.PutUint32(buf[4:8], p.Header.ToPeerID)
+	buf[8] = byte(p.Header.PacketType)
+	buf[9] = p.Header.Flags
+	buf[10] = p.Header.ForwardCounter
 	if p.Header.ForwardCounter == 0 {
-		buf[14] = 1
+		buf[10] = 1
 	}
-	binary.LittleEndian.PutUint32(buf[16:20], p.Header.PayloadLength)
-	copy(buf[20:], p.Payload)
+	binary.LittleEndian.PutUint32(buf[12:16], p.Header.PayloadLength)
+	copy(buf[PeerManagerHeaderSize:], p.Payload)
 	return buf
 }
 
