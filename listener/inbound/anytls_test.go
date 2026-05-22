@@ -69,6 +69,7 @@ func TestInboundAnyTLS_Reality(t *testing.T) {
 		},
 	}
 	outboundOptions.DialerForAPI = tunnel.NewDialer()
+	outboundOptions.TunnelForAPI = tunnel
 
 	out, err := outbound.NewAnyTLS(outboundOptions)
 	if !assert.NoError(t, err) {
