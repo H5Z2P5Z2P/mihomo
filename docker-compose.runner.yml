@@ -1,0 +1,23 @@
+services:
+  mihomo-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.runner
+    container_name: mihomo-actions-runner
+    restart: unless-stopped
+    environment:
+      REPO_URL: ${REPO_URL:-https://github.com/H5Z2P5Z2P/mihomo}
+      RUNNER_NAME: ${RUNNER_NAME:-mihomo-local}
+      RUNNER_LABELS: ${RUNNER_LABELS:-mihomo-local}
+      RUNNER_WORKDIR: ${RUNNER_WORKDIR:-_work}
+      RUNNER_TOKEN: ${RUNNER_TOKEN:-}
+      RUNNER_EPHEMERAL: ${RUNNER_EPHEMERAL:-false}
+      RUNNER_REMOVE_ON_EXIT: ${RUNNER_REMOVE_ON_EXIT:-false}
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    volumes:
+      - mihomo-runner-work:/home/runner/actions-runner/_work
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  mihomo-runner-work:
