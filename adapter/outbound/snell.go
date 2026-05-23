@@ -82,16 +82,28 @@ func (s *Snell) writeHeaderContext(ctx context.Context, c net.Conn, metadata *C.
 // DialContext implements C.ProxyAdapter
 func (s *Snell) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {
 	if s.reuse {
-		c, err := s.pool.Get()
+		c, err := s.pool.GetContext(ctx)
 		if err != nil {
 			return nil, err
 		}
 
-		if err = s.writeHeaderContext(ctx, c, metadata); err != nil {
-			_ = c.Close()
+		if err = s.writeHeaderContext(ctx, c, metadata); err == nil {
+			return NewConn(c, s), nil
+		}
+		discardSnellReuseConn(c)
+		if ctx.Err() != nil {
 			return nil, err
 		}
-		return NewConn(c, s), err
+
+		c, err = s.pool.GetFreshContext(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if err = s.writeHeaderContext(ctx, c, metadata); err != nil {
+			discardSnellReuseConn(c)
+			return nil, err
+		}
+		return NewConn(c, s), nil
 	}
 
 	c, err := s.dialer.DialContext(ctx, "tcp", s.addr)
@@ -105,6 +117,14 @@ func (s *Snell) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn
 
 	c, err = s.StreamConnContext(ctx, c, metadata)
 	return NewConn(c, s), err
+}
+
+func discardSnellReuseConn(c net.Conn) {
+	if c, ok := c.(interface{ Discard() error }); ok {
+		_ = c.Discard()
+		return
+	}
+	_ = c.Close()
 }
 
 // ListenPacketContext implements C.ProxyAdapter

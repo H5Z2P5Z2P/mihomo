@@ -96,6 +96,35 @@ func TestPoolConnReadZeroChunkReturnsEOF(t *testing.T) {
 	}
 }
 
+func TestPoolGetFreshContextBypassesPooledConn(t *testing.T) {
+	pooledConn := &Snell{Conn: &recordingConn{}}
+	factoryConn := &Snell{Conn: &recordingConn{}}
+	pool := NewPool(func(context.Context) (*Snell, error) {
+		return factoryConn, nil
+	})
+	pool.put(pooledConn)
+
+	got, err := pool.GetFreshContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	poolConn, ok := got.(*PoolConn)
+	if !ok {
+		t.Fatalf("fresh conn type = %T, want *PoolConn", got)
+	}
+	if poolConn.Snell != factoryConn {
+		t.Fatal("GetFreshContext should use the factory instead of a pooled connection")
+	}
+
+	stillPooled, err := pool.pool.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stillPooled != pooledConn {
+		t.Fatal("GetFreshContext should leave pooled connections in the pool")
+	}
+}
+
 type recordingConn struct {
 	writes int
 	closed bool

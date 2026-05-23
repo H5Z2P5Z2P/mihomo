@@ -12,7 +12,8 @@ import (
 )
 
 type Pool struct {
-	pool *pool.Pool[*Snell]
+	pool    *pool.Pool[*Snell]
+	factory func(context.Context) (*Snell, error)
 }
 
 func (p *Pool) Get() (net.Conn, error) {
@@ -21,6 +22,15 @@ func (p *Pool) Get() (net.Conn, error) {
 
 func (p *Pool) GetContext(ctx context.Context) (net.Conn, error) {
 	elm, err := p.pool.GetContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return &PoolConn{Snell: elm, pool: p}, nil
+}
+
+func (p *Pool) GetFreshContext(ctx context.Context) (net.Conn, error) {
+	elm, err := p.factory(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -86,17 +96,24 @@ func (pc *PoolConn) Close() error {
 	return pc.closeErr
 }
 
+func (pc *PoolConn) Discard() error {
+	pc.closeOnce.Do(func() {
+		pc.closeErr = pc.Snell.Close()
+	})
+	return pc.closeErr
+}
+
 func NewPool(factory func(context.Context) (*Snell, error)) *Pool {
 	p := pool.New[*Snell](
 		func(ctx context.Context) (*Snell, error) {
 			return factory(ctx)
 		},
-		pool.WithAge[*Snell](15000),
+		pool.WithAge[*Snell](8000),
 		pool.WithSize[*Snell](10),
 		pool.WithEvict[*Snell](func(item *Snell) {
 			_ = item.Close()
 		}),
 	)
 
-	return &Pool{pool: p}
+	return &Pool{pool: p, factory: factory}
 }
