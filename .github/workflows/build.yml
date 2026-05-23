@@ -5,14 +5,6 @@ on:
       version:
         description: "Tag version to release"
         required: true
-      runner:
-        description: "Runner backend"
-        required: false
-        default: github-hosted
-        type: choice
-        options:
-          - github-hosted
-          - self-hosted
   push:
     paths-ignore:
       - "docs/**"
@@ -33,7 +25,7 @@ env:
   REGISTRY: docker.io
 jobs:
   build:
-    runs-on: ${{ fromJSON(((github.event_name == 'workflow_dispatch' && inputs.runner == 'self-hosted') || (github.event_name == 'push' && vars.MIHOMO_RUNNER == 'self-hosted')) && '["self-hosted","Linux","X64","mihomo-local"]' || '["ubuntu-latest"]') }}
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         jobs:
@@ -166,8 +158,6 @@ jobs:
 
     steps:
     - uses: actions/checkout@v6
-      with:
-        ref: ${{ github.sha }}
 
     - name: Set up Go
       if: ${{ matrix.jobs.goversion == '' }}
@@ -201,11 +191,8 @@ jobs:
         VERSION="${GITHUB_REF_NAME,,}-$(git rev-parse --short HEAD)"
         VERSION="${VERSION//\//-}"
         PackageVersion="$(curl -s "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest" | jq -r '.tag_name' | sed 's/v//g' | awk -F '.' '{$NF = $NF + 1; print}' OFS='.').${VERSION/-/.}"
-        if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-          VERSION="${GITHUB_REF_NAME}"
-          PackageVersion="${VERSION#v}"
-        elif [ -n "${{ github.event.inputs.version }}" ]; then
-          VERSION="${{ github.event.inputs.version }}"
+        if [ -n "${{ github.event.inputs.version }}" ]; then
+          VERSION=${{ github.event.inputs.version }}
           PackageVersion="${VERSION#v}"
         fi
         echo "VERSION=${VERSION}" >> $GITHUB_ENV
@@ -343,7 +330,7 @@ jobs:
     permissions: write-all
     if: ${{ github.event_name != 'workflow_dispatch' && github.ref_type == 'branch' && !startsWith(github.event_name, 'pull_request') }}
     needs: [build]
-    runs-on: ${{ fromJSON((github.event_name == 'push' && vars.MIHOMO_RUNNER == 'self-hosted') && '["self-hosted","Linux","X64","mihomo-local"]' || '["ubuntu-latest"]') }}
+    runs-on: ubuntu-latest
     steps:
     - name: Download all workflow run artifacts
       uses: actions/download-artifact@v8
@@ -399,47 +386,27 @@ jobs:
 
   Upload-Release:
     permissions: write-all
-    if: ${{ (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.version != '') }}
+    if: ${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'v') }}
     needs: [build]
-    runs-on: ${{ fromJSON(((github.event_name == 'workflow_dispatch' && inputs.runner == 'self-hosted') || (github.event_name == 'push' && vars.MIHOMO_RUNNER == 'self-hosted')) && '["self-hosted","Linux","X64","mihomo-local"]' || '["ubuntu-latest"]') }}
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.sha }}
           fetch-depth: '0'
           fetch-tags: 'true'
 
       - name: Get tags
         run: |
-          CURRENTVERSION="${GITHUB_REF_NAME}"
-          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
-            CURRENTVERSION="${{ github.event.inputs.version }}"
-          fi
-          echo "CURRENTVERSION=${CURRENTVERSION}" >> $GITHUB_ENV
-          git fetch --tags --force
-          if git rev-parse "${CURRENTVERSION}^{commit}" >/dev/null 2>&1; then
-            PREVERSION="$(git describe --tags --abbrev=0 "${CURRENTVERSION}^" 2>/dev/null || true)"
-          else
-            PREVERSION="$(git describe --tags --abbrev=0 HEAD 2>/dev/null || true)"
-          fi
-          echo "PREVERSION=${PREVERSION:-${CURRENTVERSION}}" >> $GITHUB_ENV
+          echo "CURRENTVERSION=${{ github.event.inputs.version }}" >> $GITHUB_ENV
+          git fetch --tags
+          echo "PREVERSION=$(git describe --tags --abbrev=0 HEAD)" >> $GITHUB_ENV
 
-      - name: Tag the commit
-        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version != '' }}
+      - name: Tag the commit on anyreality
         run: |
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git config --global user.name "github-actions[bot]"
-          VERSION="${{ github.event.inputs.version }}"
-          if git rev-parse "${VERSION}^{commit}" >/dev/null 2>&1; then
-            if [ "$(git rev-parse "${VERSION}^{commit}")" != "${GITHUB_SHA}" ]; then
-              echo "tag ${VERSION} already exists on another commit" >&2
-              exit 1
-            fi
-          else
-            git tag "${VERSION}" "${GITHUB_SHA}"
-            git push origin "refs/tags/${VERSION}"
-          fi
+          git checkout anyreality 
+          git tag ${{ github.event.inputs.version }}
+          git push origin ${{ github.event.inputs.version }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -469,7 +436,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         if: ${{ success() }}
         with:
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}
+          tag_name: ${{ github.ref_name }}
           files: bin/*
           generate_release_notes: true
 
@@ -477,12 +444,11 @@ jobs:
     if: ${{ !startsWith(github.event_name, 'pull_request') }}
     permissions: write-all
     needs: [build]
-    runs-on: ${{ fromJSON(((github.event_name == 'workflow_dispatch' && inputs.runner == 'self-hosted') || (github.event_name == 'push' && vars.MIHOMO_RUNNER == 'self-hosted')) && '["self-hosted","Linux","X64","mihomo-local"]' || '["ubuntu-latest"]') }}
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - uses: actions/download-artifact@v8
