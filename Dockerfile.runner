@@ -23,7 +23,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tar \
     unzip \
     zip \
-    zstd \
   && rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \

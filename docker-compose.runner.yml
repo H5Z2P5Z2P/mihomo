@@ -18,11 +18,7 @@ services:
       - host.docker.internal:host-gateway
     volumes:
       - mihomo-runner-work:/home/runner/actions-runner/_work
-      - mihomo-go-mod:/home/runner/go/pkg/mod
-      - mihomo-go-build:/home/runner/.cache/go-build
       - /var/run/docker.sock:/var/run/docker.sock
 
 volumes:
   mihomo-runner-work:
-  mihomo-go-mod:
-  mihomo-go-build:
