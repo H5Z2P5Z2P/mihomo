@@ -42,7 +42,7 @@ env:
 jobs:
   build:
     if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.smoke == 'true') }}
-    runs-on: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.runner == 'self-hosted') && '["self-hosted","Linux","X64","mihomo-local"]' || '["ubuntu-latest"]') }}
+    runs-on: ${{ fromJSON(((github.event_name == 'workflow_dispatch' && inputs.runner == 'self-hosted') || (github.event_name == 'push' && (contains(github.ref_name, 'selfhosted') || contains(github.ref_name, 'self-hosted') || contains(github.event.head_commit.message || '', '[self-hosted]') || contains(github.event.head_commit.message || '', '[runner:self-hosted]') || (vars.MIHOMO_RUNNER == 'self-hosted' && !contains(github.ref_name, 'githubhosted') && !contains(github.ref_name, 'github-hosted') && !contains(github.event.head_commit.message || '', '[github-hosted]') && !contains(github.event.head_commit.message || '', '[runner:github-hosted]'))))) && '["self-hosted","Linux","X64","mihomo-local"]' || '["ubuntu-latest"]') }}
     strategy:
       matrix:
         jobs:
@@ -184,7 +184,7 @@ jobs:
       with:
         go-download-base-url: 'https://github.com/MetaCubeX/go/releases/download/build'
         go-version: '1.26'
-        cache: ${{ !(github.event_name == 'workflow_dispatch' && inputs.runner == 'self-hosted') }}
+        cache: ${{ !((github.event_name == 'workflow_dispatch' && inputs.runner == 'self-hosted') || (github.event_name == 'push' && (contains(github.ref_name, 'selfhosted') || contains(github.ref_name, 'self-hosted') || contains(github.event.head_commit.message || '', '[self-hosted]') || contains(github.event.head_commit.message || '', '[runner:self-hosted]') || (vars.MIHOMO_RUNNER == 'self-hosted' && !contains(github.ref_name, 'githubhosted') && !contains(github.ref_name, 'github-hosted') && !contains(github.event.head_commit.message || '', '[github-hosted]') && !contains(github.event.head_commit.message || '', '[runner:github-hosted]'))))) }}
 
     - name: Set up Go
       if: ${{ matrix.jobs.goversion != '' && matrix.jobs.goversion != 'custom' }}
@@ -192,7 +192,7 @@ jobs:
       with:
         go-download-base-url: 'https://github.com/MetaCubeX/go/releases/download/build'
         go-version: ${{ matrix.jobs.goversion }}
-        cache: ${{ !(github.event_name == 'workflow_dispatch' && inputs.runner == 'self-hosted') }}
+        cache: ${{ !((github.event_name == 'workflow_dispatch' && inputs.runner == 'self-hosted') || (github.event_name == 'push' && (contains(github.ref_name, 'selfhosted') || contains(github.ref_name, 'self-hosted') || contains(github.event.head_commit.message || '', '[self-hosted]') || contains(github.event.head_commit.message || '', '[runner:self-hosted]') || (vars.MIHOMO_RUNNER == 'self-hosted' && !contains(github.ref_name, 'githubhosted') && !contains(github.ref_name, 'github-hosted') && !contains(github.event.head_commit.message || '', '[github-hosted]') && !contains(github.event.head_commit.message || '', '[runner:github-hosted]'))))) }}
 
     - name: Set up Go1.26 loongarch abi1
       if: ${{ matrix.jobs.goarch == 'loong64' && matrix.jobs.abi == '1' }}
@@ -200,7 +200,7 @@ jobs:
       with:
         go-download-base-url: 'https://github.com/MetaCubeX/loongarch64-golang/releases/download/1.26.0'
         go-version: 1.26.0
-        cache: ${{ !(github.event_name == 'workflow_dispatch' && inputs.runner == 'self-hosted') }}
+        cache: ${{ !((github.event_name == 'workflow_dispatch' && inputs.runner == 'self-hosted') || (github.event_name == 'push' && (contains(github.ref_name, 'selfhosted') || contains(github.ref_name, 'self-hosted') || contains(github.event.head_commit.message || '', '[self-hosted]') || contains(github.event.head_commit.message || '', '[runner:self-hosted]') || (vars.MIHOMO_RUNNER == 'self-hosted' && !contains(github.ref_name, 'githubhosted') && !contains(github.ref_name, 'github-hosted') && !contains(github.event.head_commit.message || '', '[github-hosted]') && !contains(github.event.head_commit.message || '', '[runner:github-hosted]'))))) }}
 
     - name: Verify Go installation
       run: go version
@@ -355,7 +355,7 @@ jobs:
     permissions: write-all
     if: ${{ github.event_name != 'workflow_dispatch' && github.ref_type == 'branch' && !startsWith(github.event_name, 'pull_request') }}
     needs: [build]
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON((github.event_name == 'push' && (contains(github.ref_name, 'selfhosted') || contains(github.ref_name, 'self-hosted') || contains(github.event.head_commit.message || '', '[self-hosted]') || contains(github.event.head_commit.message || '', '[runner:self-hosted]') || (vars.MIHOMO_RUNNER == 'self-hosted' && !contains(github.ref_name, 'githubhosted') && !contains(github.ref_name, 'github-hosted') && !contains(github.event.head_commit.message || '', '[github-hosted]') && !contains(github.event.head_commit.message || '', '[runner:github-hosted]')))) && '["self-hosted","Linux","X64","mihomo-local"]' || '["ubuntu-latest"]') }}
     steps:
     - name: Download all workflow run artifacts
       uses: actions/download-artifact@v8
@@ -413,7 +413,7 @@ jobs:
     permissions: write-all
     if: ${{ ((github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.version != '')) && !(github.event_name == 'workflow_dispatch' && inputs.smoke == 'true') }}
     needs: [build]
-    runs-on: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.runner == 'self-hosted') && '["self-hosted","Linux","X64","mihomo-local"]' || '["ubuntu-latest"]') }}
+    runs-on: ${{ fromJSON(((github.event_name == 'workflow_dispatch' && inputs.runner == 'self-hosted') || (github.event_name == 'push' && (contains(github.ref_name, 'selfhosted') || contains(github.ref_name, 'self-hosted') || contains(github.event.head_commit.message || '', '[self-hosted]') || contains(github.event.head_commit.message || '', '[runner:self-hosted]') || (vars.MIHOMO_RUNNER == 'self-hosted' && !contains(github.ref_name, 'githubhosted') && !contains(github.ref_name, 'github-hosted') && !contains(github.event.head_commit.message || '', '[github-hosted]') && !contains(github.event.head_commit.message || '', '[runner:github-hosted]'))))) && '["self-hosted","Linux","X64","mihomo-local"]' || '["ubuntu-latest"]') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -488,7 +488,7 @@ jobs:
   Smoke-Release:
     permissions: write-all
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.smoke == 'true' && github.event.inputs.version != '' }}
-    runs-on: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.runner == 'self-hosted') && '["self-hosted","Linux","X64","mihomo-local"]' || '["ubuntu-latest"]') }}
+    runs-on: ${{ fromJSON(((github.event_name == 'workflow_dispatch' && inputs.runner == 'self-hosted') || (github.event_name == 'push' && (contains(github.ref_name, 'selfhosted') || contains(github.ref_name, 'self-hosted') || contains(github.event.head_commit.message || '', '[self-hosted]') || contains(github.event.head_commit.message || '', '[runner:self-hosted]') || (vars.MIHOMO_RUNNER == 'self-hosted' && !contains(github.ref_name, 'githubhosted') && !contains(github.ref_name, 'github-hosted') && !contains(github.event.head_commit.message || '', '[github-hosted]') && !contains(github.event.head_commit.message || '', '[runner:github-hosted]'))))) && '["self-hosted","Linux","X64","mihomo-local"]' || '["ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -548,7 +548,7 @@ jobs:
     if: ${{ !startsWith(github.event_name, 'pull_request') && !(github.event_name == 'workflow_dispatch' && inputs.smoke == 'true') }}
     permissions: write-all
     needs: [build]
-    runs-on: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.runner == 'self-hosted') && '["self-hosted","Linux","X64","mihomo-local"]' || '["ubuntu-latest"]') }}
+    runs-on: ${{ fromJSON(((github.event_name == 'workflow_dispatch' && inputs.runner == 'self-hosted') || (github.event_name == 'push' && (contains(github.ref_name, 'selfhosted') || contains(github.ref_name, 'self-hosted') || contains(github.event.head_commit.message || '', '[self-hosted]') || contains(github.event.head_commit.message || '', '[runner:self-hosted]') || (vars.MIHOMO_RUNNER == 'self-hosted' && !contains(github.ref_name, 'githubhosted') && !contains(github.ref_name, 'github-hosted') && !contains(github.event.head_commit.message || '', '[github-hosted]') && !contains(github.event.head_commit.message || '', '[runner:github-hosted]'))))) && '["self-hosted","Linux","X64","mihomo-local"]' || '["ubuntu-latest"]') }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6

@@ -15,27 +15,38 @@ RUNNER_TOKEN=$(gh api -X POST repos/H5Z2P5Z2P/mihomo/actions/runners/registratio
   docker compose -f docker-compose.runner.yml up -d --build
 ```
 
+Route the workflow to the self-hosted runner:
+
+```bash
+gh variable set MIHOMO_RUNNER --body self-hosted
+```
+
 Run the workflow manually on the self-hosted runner:
 
 ```bash
 gh workflow run Build -r anyreality-snell-alpha \
   -f version=v1.19.25-alpha-YYYYMMDDHHMM-anyreality-snell-alpha \
-  -f runner=self-hosted \
-  -f smoke=false
+  -f runner=self-hosted
 ```
 
-Run the workflow manually on GitHub-hosted runners:
+For tag-triggered releases, create the tag after the workflow changes are pushed. A rerun of an old failed tag workflow still uses the workflow file stored at that old tag.
+
+Runner selection for push/tag events:
+
+```text
+[self-hosted] or [runner:self-hosted] in the commit message selects the local runner.
+[github-hosted] or [runner:github-hosted] in the commit message selects GitHub-hosted runners.
+Tag names containing selfhosted or self-hosted select the local runner.
+Tag names containing githubhosted or github-hosted select GitHub-hosted runners.
+```
+
+When the local runner is selected, `actions/setup-go` cache upload is disabled. Go module/build caches are kept locally through Docker volumes.
+
+Route the workflow back to GitHub-hosted runners:
 
 ```bash
-gh workflow run Build -r anyreality-snell-alpha \
-  -f version=v1.19.25-alpha-YYYYMMDDHHMM-anyreality-snell-alpha \
-  -f runner=github-hosted \
-  -f smoke=false
+gh variable set MIHOMO_RUNNER --body github-hosted
 ```
-
-For push/tag-triggered releases, the workflow uses GitHub-hosted runners. A rerun of an old failed tag workflow still uses the workflow file stored at that old tag.
-
-When `runner=self-hosted` is selected, `actions/setup-go` cache upload is disabled. Go module/build caches are kept locally through Docker volumes.
 
 Check runner status:
 
