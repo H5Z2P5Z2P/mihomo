@@ -31,6 +31,17 @@ gh workflow run Build -r anyreality-snell-alpha \
 
 For tag-triggered releases, create the tag after the workflow changes are pushed. A rerun of an old failed tag workflow still uses the workflow file stored at that old tag.
 
+Runner selection for push/tag events:
+
+```text
+[self-hosted] or [runner:self-hosted] in the commit message selects the local runner.
+[github-hosted] or [runner:github-hosted] in the commit message selects GitHub-hosted runners.
+Tag names containing selfhosted or self-hosted select the local runner.
+Tag names containing githubhosted or github-hosted select GitHub-hosted runners.
+```
+
+When the local runner is selected, `actions/setup-go` cache upload is disabled. Go module/build caches are kept locally through Docker volumes.
+
 Route the workflow back to GitHub-hosted runners:
 
 ```bash
