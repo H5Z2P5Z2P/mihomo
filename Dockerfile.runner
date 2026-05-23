@@ -15,7 +15,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libarchive-tools \
     lsb-release \
     openssh-client \
-    python3 \
     rpm \
     ruby \
     ruby-dev \
@@ -25,24 +24,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zip \
   && rm -rf /var/lib/apt/lists/*
 
-RUN set -eux; \
-  mkdir -p /usr/local/lib/docker/cli-plugins; \
-  docker_arch=""; \
-  case "$(dpkg --print-architecture)" in \
-    amd64) docker_arch=amd64 ;; \
-    arm64) docker_arch=arm64 ;; \
-    armhf|arm) docker_arch=arm-v7 ;; \
-    *) echo "unsupported architecture: $(dpkg --print-architecture)" >&2; exit 1 ;; \
-  esac; \
-  buildx_version="$(curl -fsSL https://api.github.com/repos/docker/buildx/releases/latest | jq -r '.tag_name')"; \
-  curl -fsSL -o /usr/local/lib/docker/cli-plugins/docker-buildx "https://github.com/docker/buildx/releases/download/${buildx_version}/buildx-${buildx_version}.linux-${docker_arch}"; \
-  chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
-
 RUN useradd -m -s /bin/bash runner \
   && echo 'runner ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/runner \
-  && chmod 0440 /etc/sudoers.d/runner \
-  && mkdir -p /opt/hostedtoolcache \
-  && chown -R runner:runner /opt/hostedtoolcache
+  && chmod 0440 /etc/sudoers.d/runner
 
 WORKDIR /home/runner/actions-runner
 

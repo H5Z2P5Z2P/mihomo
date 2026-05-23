@@ -13,7 +13,6 @@ services:
       RUNNER_TOKEN: ${RUNNER_TOKEN:-}
       RUNNER_EPHEMERAL: ${RUNNER_EPHEMERAL:-false}
       RUNNER_REMOVE_ON_EXIT: ${RUNNER_REMOVE_ON_EXIT:-false}
-      RUNNER_TOOL_CACHE: ${RUNNER_TOOL_CACHE:-/home/runner/actions-runner/_work/_tool}
     extra_hosts:
       - host.docker.internal:host-gateway
     volumes:
