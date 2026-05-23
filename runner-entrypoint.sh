@@ -8,7 +8,8 @@ RUNNER_NAME="${RUNNER_NAME:-mihomo-local}"
 RUNNER_LABELS="${RUNNER_LABELS:-mihomo-local}"
 RUNNER_WORKDIR="${RUNNER_WORKDIR:-_work}"
 
-chown -R runner:runner /home/runner/actions-runner
+mkdir -p /home/runner/go/bin /home/runner/go/pkg/mod /home/runner/.cache/go-build
+chown -R runner:runner /home/runner/actions-runner /home/runner/go /home/runner/.cache
 
 if [ -S /var/run/docker.sock ]; then
   docker_gid="$(stat -c '%g' /var/run/docker.sock)"
