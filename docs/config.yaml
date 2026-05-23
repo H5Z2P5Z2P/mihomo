@@ -399,8 +399,8 @@ proxies: # socks5
     server: server
     port: 44046
     psk: yourpsk
-    # version: 4 # support 1/2/3/4/5
-    # udp: true # support UDP on version 3/4/5
+    # version: 4 # support 1/2/3/4/5; version 5 UDP uses Snell v5 QUIC proxy mode
+    # udp: true # support UDP on version 3/4/5; version 3/4 use UDP-over-TCP, version 5 uses QUIC mode
     # reuse: false # v4/5 only
     # obfs-opts:
     # mode: http # or tls

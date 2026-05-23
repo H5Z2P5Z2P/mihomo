@@ -109,6 +109,23 @@ func (s *Snell) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn
 
 // ListenPacketContext implements C.ProxyAdapter
 func (s *Snell) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (_ C.PacketConn, err error) {
+	if s.version == snell.Version5 {
+		serverAddr, err := resolveUDPAddr(ctx, "udp", s.addr, s.prefer)
+		if err != nil {
+			return nil, err
+		}
+		pc, err := s.dialer.ListenPacket(ctx, "udp", "", serverAddr.AddrPort())
+		if err != nil {
+			return nil, err
+		}
+		qpc := newSnellQUICPacketConn(pc, serverAddr, s.psk, metadata, s.prefer)
+		cpc := newPacketConn(qpc, s)
+		if wrapped, ok := cpc.(*packetConn); ok {
+			wrapped.resolveUDP = qpc.resolveUDP
+		}
+		return cpc, nil
+	}
+
 	if err = s.ResolveUDP(ctx, metadata); err != nil {
 		return nil, err
 	}
@@ -132,7 +149,7 @@ func (s *Snell) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 
 // SupportUOT implements C.ProxyAdapter
 func (s *Snell) SupportUOT() bool {
-	return true
+	return s.version != snell.Version5
 }
 
 // ProxyInfo implements C.ProxyAdapter
@@ -163,17 +180,13 @@ func NewSnell(option SnellOption) (*Snell, error) {
 	if option.Version == 0 {
 		option.Version = snell.DefaultSnellVersion
 	}
-	if option.Version == snell.Version5 {
-		// Snell v5 servers are backward-compatible with v4 clients.
-		option.Version = snell.Version4
-	}
-	reuse := option.Version == snell.Version2 || (option.Version == snell.Version4 && option.Reuse)
+	reuse := option.Version == snell.Version2 || (option.Version >= snell.Version4 && option.Reuse)
 	switch option.Version {
 	case snell.Version1, snell.Version2:
 		if option.UDP {
 			return nil, fmt.Errorf("snell version %d not support UDP", option.Version)
 		}
-	case snell.Version3, snell.Version4:
+	case snell.Version3, snell.Version4, snell.Version5:
 	default:
 		return nil, fmt.Errorf("snell version error: %d", option.Version)
 	}

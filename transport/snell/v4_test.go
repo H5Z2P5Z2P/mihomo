@@ -345,6 +345,70 @@ func TestSnellReadReplyErrorResponse(t *testing.T) {
 	}
 }
 
+func TestEncodeQUICEnvelope(t *testing.T) {
+	inner := []byte("quic initial")
+	envelope, err := EncodeQUICEnvelope([]byte("password"), "example.com", 443, inner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(envelope) < v4SaltSize+v4HeaderCipherSize {
+		t.Fatalf("envelope too short: %d", len(envelope))
+	}
+
+	aead, err := v4AEAD([]byte("password"), envelope[:v4SaltSize])
+	if err != nil {
+		t.Fatal(err)
+	}
+	headerCipher := envelope[v4SaltSize : v4SaltSize+v4HeaderCipherSize]
+	header, err := aead.Open(nil, make([]byte, aead.NonceSize()), headerCipher, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(header) != v4HeaderPlainSize || header[0] != 4 {
+		t.Fatalf("invalid header: %x", header)
+	}
+	paddingLength := int(binary.BigEndian.Uint16(header[3:5]))
+	payloadLength := int(binary.BigEndian.Uint16(header[5:7]))
+	if paddingLength != 0 {
+		t.Fatalf("unexpected padding length: %d", paddingLength)
+	}
+	payloadCipher := envelope[v4SaltSize+v4HeaderCipherSize:]
+	if len(payloadCipher) != payloadLength+aead.Overhead() {
+		t.Fatalf("payload length mismatch: got %d want %d", len(payloadCipher), payloadLength+aead.Overhead())
+	}
+	nonce1 := make([]byte, aead.NonceSize())
+	binary.LittleEndian.PutUint64(nonce1, 1)
+	payload, err := aead.Open(nil, nonce1, payloadCipher, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPrefix := []byte{quicReqVersion, quicReqCommand, 0, byte(len("example.com"))}
+	if !bytes.Equal(payload[:len(wantPrefix)], wantPrefix) {
+		t.Fatalf("unexpected payload prefix: %x", payload[:len(wantPrefix)])
+	}
+	offset := len(wantPrefix)
+	if got := string(payload[offset : offset+len("example.com")]); got != "example.com" {
+		t.Fatalf("unexpected host: %q", got)
+	}
+	offset += len("example.com")
+	if got := binary.BigEndian.Uint16(payload[offset : offset+2]); got != 443 {
+		t.Fatalf("unexpected port: %d", got)
+	}
+	offset += 2
+	if !bytes.Equal(payload[offset:], inner) {
+		t.Fatalf("unexpected inner packet: %q", payload[offset:])
+	}
+}
+
+func TestEncodeQUICEnvelopeRejectsInvalidInput(t *testing.T) {
+	if _, err := EncodeQUICEnvelope([]byte("password"), "example.com", 443, nil); err == nil {
+		t.Fatal("expected empty inner QUIC packet error")
+	}
+	if _, err := EncodeQUICEnvelope([]byte("password"), string(bytes.Repeat([]byte{'a'}, 256)), 443, []byte("x")); err == nil {
+		t.Fatal("expected long host error")
+	}
+}
+
 func TestWritePacketResponseUsesSocksAddrParser(t *testing.T) {
 	var buf bytes.Buffer
 	n, err := WritePacketResponse(&buf, dummyAddr("127.0.0.1:53"), []byte("ok"))
