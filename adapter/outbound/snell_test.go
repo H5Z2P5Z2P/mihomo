@@ -121,6 +121,67 @@ func TestSnellQUICPacketConnFirstPacketEnvelopeThenRaw(t *testing.T) {
 	}
 }
 
+func TestSnellQUICPacketConnRetriesEnvelopeUntilResponse(t *testing.T) {
+	raw := &recordingPacketConn{localAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 10000}}
+	serverAddr := &net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 44046}
+	metadata := &C.Metadata{NetWork: C.UDP, Host: "example.com", DstPort: 443}
+	pc := newSnellQUICPacketConn(raw, serverAddr, []byte("password"), metadata, C.DualStack)
+	targetAddr := &net.UDPAddr{IP: net.IPv4(9, 9, 9, 9), Port: 443}
+
+	first := []byte("first quic packet")
+	if _, err := pc.WriteTo(first, targetAddr); err != nil {
+		t.Fatal(err)
+	}
+	pc.lastEnvelopeNano = time.Now().Add(-snellQUICEnvelopeRetryInterval).UnixNano()
+
+	second := []byte("second quic packet")
+	n, err := pc.WriteTo(second, targetAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != len(second) {
+		t.Fatalf("second write length = %d, want %d", n, len(second))
+	}
+	if len(raw.writes) != 3 {
+		t.Fatalf("writes = %d, want 3", len(raw.writes))
+	}
+	if bytes.Equal(raw.writes[1].data, second) {
+		t.Fatal("retry packet should include an encrypted envelope")
+	}
+	if !bytes.Equal(raw.writes[2].data, second) {
+		t.Fatalf("retry should still forward raw packet, got %q want %q", raw.writes[2].data, second)
+	}
+}
+
+func TestSnellQUICPacketConnResponseConfirmsRawMode(t *testing.T) {
+	raw := &recordingPacketConn{localAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 10000}}
+	serverAddr := &net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 44046}
+	targetAddr := &net.UDPAddr{IP: net.IPv4(9, 9, 9, 9), Port: 443}
+	metadata := &C.Metadata{NetWork: C.UDP, DstIP: targetAddr.AddrPort().Addr(), DstPort: 443}
+	pc := newSnellQUICPacketConn(raw, serverAddr, []byte("password"), metadata, C.DualStack)
+
+	if _, err := pc.WriteTo([]byte("first"), targetAddr); err != nil {
+		t.Fatal(err)
+	}
+	raw.reads = append(raw.reads, packetRead{data: []byte("response"), addr: serverAddr})
+	buf := make([]byte, 64)
+	if _, _, err := pc.ReadFrom(buf); err != nil {
+		t.Fatal(err)
+	}
+	pc.lastEnvelopeNano = time.Now().Add(-snellQUICEnvelopeRetryInterval).UnixNano()
+
+	second := []byte("raw after response")
+	if _, err := pc.WriteTo(second, targetAddr); err != nil {
+		t.Fatal(err)
+	}
+	if len(raw.writes) != 2 {
+		t.Fatalf("writes = %d, want 2", len(raw.writes))
+	}
+	if !bytes.Equal(raw.writes[1].data, second) {
+		t.Fatalf("confirmed write should be raw, got %q want %q", raw.writes[1].data, second)
+	}
+}
+
 func TestSnellQUICPacketConnReadFromReturnsTarget(t *testing.T) {
 	raw := &recordingPacketConn{localAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 10000}}
 	serverAddr := &net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 44046}
@@ -258,3 +319,48 @@ func (a scriptedAddr) Network() string {
 func (a scriptedAddr) String() string {
 	return string(a)
 }
+
+func BenchmarkSnellQUICPacketConnRawWrite(b *testing.B) {
+	raw := &discardPacketConn{localAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 10000}}
+	serverAddr := &net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 44046}
+	targetAddr := &net.UDPAddr{IP: net.IPv4(9, 9, 9, 9), Port: 443}
+	metadata := &C.Metadata{NetWork: C.UDP, DstIP: targetAddr.AddrPort().Addr(), DstPort: 443}
+	pc := newSnellQUICPacketConn(raw, serverAddr, []byte("password"), metadata, C.DualStack)
+	pc.sent.Store(true)
+	pc.confirmed.Store(true)
+	payload := bytes.Repeat([]byte("x"), 1200)
+
+	b.SetBytes(int64(len(payload)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := pc.WriteTo(payload, targetAddr); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+type discardPacketConn struct {
+	localAddr net.Addr
+}
+
+func (c *discardPacketConn) ReadFrom([]byte) (int, net.Addr, error) {
+	return 0, nil, net.ErrClosed
+}
+
+func (c *discardPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	return len(p), nil
+}
+
+func (c *discardPacketConn) Close() error { return nil }
+
+func (c *discardPacketConn) LocalAddr() net.Addr {
+	if c.localAddr == nil {
+		return &net.UDPAddr{}
+	}
+	return c.localAddr
+}
+
+func (c *discardPacketConn) SetDeadline(time.Time) error      { return nil }
+func (c *discardPacketConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *discardPacketConn) SetWriteDeadline(time.Time) error { return nil }

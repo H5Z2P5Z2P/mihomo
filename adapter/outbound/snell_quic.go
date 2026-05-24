@@ -6,6 +6,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/metacubex/mihomo/component/resolver"
@@ -13,17 +14,26 @@ import (
 	"github.com/metacubex/mihomo/transport/snell"
 )
 
+const snellQUICEnvelopeRetryInterval = 250 * time.Millisecond
+
 type snellQUICPacketConn struct {
 	net.PacketConn
 	serverAddr *net.UDPAddr
 	psk        []byte
 
-	mux        sync.Mutex
-	sent       bool
-	targetHost string
-	targetPort uint16
-	targetAddr net.Addr
-	prefer     C.DNSPrefer
+	mux              sync.Mutex
+	firstMu          sync.Mutex
+	sent             atomic.Bool
+	confirmed        atomic.Bool
+	lastEnvelopeNano int64
+	targetHost       string
+	targetPort       uint16
+	targetAddr       atomic.Value
+	prefer           C.DNSPrefer
+}
+
+type snellQUICAddr struct {
+	addr net.Addr
 }
 
 func newSnellQUICPacketConn(pc net.PacketConn, serverAddr *net.UDPAddr, psk []byte, metadata *C.Metadata, prefer C.DNSPrefer) *snellQUICPacketConn {
@@ -36,7 +46,7 @@ func newSnellQUICPacketConn(pc net.PacketConn, serverAddr *net.UDPAddr, psk []by
 		prefer:     prefer,
 	}
 	if metadata.NetWork == C.UDP && metadata.DstIP.IsValid() {
-		qpc.targetAddr = metadata.UDPAddr()
+		qpc.targetAddr.Store(snellQUICAddr{addr: metadata.UDPAddr()})
 	}
 	return qpc
 }
@@ -59,36 +69,63 @@ func (c *snellQUICPacketConn) resolveUDP(ctx context.Context, metadata *C.Metada
 
 	c.mux.Lock()
 	if metadata.NetWork == C.UDP && metadata.DstIP.IsValid() {
-		c.targetAddr = metadata.UDPAddr()
+		c.targetAddr.Store(snellQUICAddr{addr: metadata.UDPAddr()})
 	}
 	c.mux.Unlock()
 	return nil
 }
 
 func (c *snellQUICPacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
-	c.mux.Lock()
-	defer c.mux.Unlock()
-
-	if c.targetAddr == nil && addr != nil {
-		c.targetAddr = addr
+	if c.targetAddr.Load() == nil && addr != nil {
+		c.targetAddr.Store(snellQUICAddr{addr: addr})
 	}
-	if c.sent {
+
+	if c.confirmed.Load() {
 		return c.PacketConn.WriteTo(b, c.serverAddr)
 	}
 
+	if !c.sent.Load() {
+		c.firstMu.Lock()
+		if !c.sent.Load() {
+			if err := c.writeEnvelope(b, addr, time.Now()); err != nil {
+				c.firstMu.Unlock()
+				return 0, err
+			}
+			c.sent.Store(true)
+			c.firstMu.Unlock()
+			return len(b), nil
+		}
+		c.firstMu.Unlock()
+	}
+
+	now := time.Now()
+	if c.shouldRetryEnvelope(now) {
+		if err := c.writeEnvelope(b, addr, now); err != nil {
+			return 0, err
+		}
+	}
+	return c.PacketConn.WriteTo(b, c.serverAddr)
+}
+
+func (c *snellQUICPacketConn) shouldRetryEnvelope(now time.Time) bool {
+	last := time.Unix(0, atomic.LoadInt64(&c.lastEnvelopeNano))
+	return !last.IsZero() && now.Sub(last) >= snellQUICEnvelopeRetryInterval
+}
+
+func (c *snellQUICPacketConn) writeEnvelope(b []byte, addr net.Addr, now time.Time) error {
 	host, port, err := c.target(addr)
 	if err != nil {
-		return 0, err
+		return err
 	}
 	envelope, err := snell.EncodeQUICEnvelope(c.psk, host, port, b)
 	if err != nil {
-		return 0, err
+		return err
 	}
 	if _, err = c.PacketConn.WriteTo(envelope, c.serverAddr); err != nil {
-		return 0, err
+		return err
 	}
-	c.sent = true
-	return len(b), nil
+	atomic.StoreInt64(&c.lastEnvelopeNano, now.UnixNano())
+	return nil
 }
 
 func (c *snellQUICPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
@@ -97,16 +134,18 @@ func (c *snellQUICPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
 		return n, nil, err
 	}
 
-	c.mux.Lock()
-	addr := c.targetAddr
-	c.mux.Unlock()
-	if addr == nil {
-		addr = c.serverAddr
+	c.confirmed.Store(true)
+	target, _ := c.targetAddr.Load().(snellQUICAddr)
+	if target.addr == nil {
+		target.addr = c.serverAddr
 	}
-	return n, addr, nil
+	return n, target.addr, nil
 }
 
 func (c *snellQUICPacketConn) target(addr net.Addr) (string, uint16, error) {
+	c.mux.Lock()
+	defer c.mux.Unlock()
+
 	if c.targetHost != "" && c.targetHost != "<nil>" && c.targetPort != 0 {
 		return c.targetHost, c.targetPort, nil
 	}
