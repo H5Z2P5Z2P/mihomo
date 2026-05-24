@@ -23,38 +23,44 @@ func EncodeQUICEnvelope(psk []byte, host string, port uint16, innerQUIC []byte) 
 		return nil, errors.New("inner QUIC packet missing")
 	}
 
-	payload := make([]byte, 0, 5+len(host)+len(innerQUIC))
-	payload = append(payload, quicReqVersion, quicReqCommand, 0, byte(len(host)))
-	payload = append(payload, host...)
-	payload = binary.BigEndian.AppendUint16(payload, port)
-	payload = append(payload, innerQUIC...)
-	if len(payload) > 0xffff {
+	payloadLength := 6 + len(host) + len(innerQUIC)
+	if payloadLength > 0xffff {
 		return nil, errors.New("envelope payload too large")
 	}
 
-	salt := make([]byte, v4SaltSize)
-	if _, err := io.ReadFull(cryptorand.Reader, salt); err != nil {
+	var salt [v4SaltSize]byte
+	if _, err := io.ReadFull(cryptorand.Reader, salt[:]); err != nil {
 		return nil, err
 	}
-	aead, err := v4AEAD(psk, salt)
+	aead, err := v4AEAD(psk, salt[:])
 	if err != nil {
 		return nil, err
 	}
 
-	header := make([]byte, v4HeaderPlainSize)
+	out := make([]byte, v4SaltSize+v4HeaderCipherSize+payloadLength+aead.Overhead())
+	copy(out, salt[:])
+
+	var header [v4HeaderPlainSize]byte
 	header[0] = 4
-	binary.BigEndian.PutUint16(header[5:7], uint16(len(payload)))
+	binary.BigEndian.PutUint16(header[5:7], uint16(payloadLength))
 
-	nonce0 := make([]byte, aead.NonceSize())
-	headerCipher := aead.Seal(nil, nonce0, header, nil)
+	var nonce0 [v4NonceSize]byte
+	headerCipher := aead.Seal(out[v4SaltSize:v4SaltSize], nonce0[:], header[:], nil)
 
-	nonce1 := make([]byte, aead.NonceSize())
-	binary.LittleEndian.PutUint64(nonce1, 1)
-	payloadCipher := aead.Seal(nil, nonce1, payload, nil)
+	var nonce1 [v4NonceSize]byte
+	binary.LittleEndian.PutUint64(nonce1[:], 1)
 
-	out := make([]byte, 0, v4SaltSize+len(headerCipher)+len(payloadCipher))
-	out = append(out, salt...)
-	out = append(out, headerCipher...)
-	out = append(out, payloadCipher...)
-	return out, nil
+	payloadStart := v4SaltSize + len(headerCipher)
+	payload := out[payloadStart : payloadStart+payloadLength]
+	payload[0] = quicReqVersion
+	payload[1] = quicReqCommand
+	payload[2] = 0
+	payload[3] = byte(len(host))
+	copy(payload[4:], host)
+	portStart := 4 + len(host)
+	binary.BigEndian.PutUint16(payload[portStart:portStart+2], port)
+	copy(payload[portStart+2:], innerQUIC)
+
+	payloadCipher := aead.Seal(payload[:0], nonce1[:], payload, nil)
+	return out[:payloadStart+len(payloadCipher)], nil
 }

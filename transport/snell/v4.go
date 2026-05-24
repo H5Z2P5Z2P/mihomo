@@ -9,6 +9,7 @@ import (
 	"math"
 	"math/big"
 	"math/bits"
+	mrand "math/rand"
 	"net"
 	"sync"
 	"time"
@@ -28,9 +29,13 @@ const (
 
 type v4Conn struct {
 	net.Conn
-	psk []byte
-	r   *v4Reader
-	w   *v4Writer
+	psk   []byte
+	r     *v4Reader
+	w     *v4Writer
+	rOnce sync.Once
+	wOnce sync.Once
+	rErr  error
+	wErr  error
 }
 
 func newV4Conn(conn net.Conn, psk []byte) *v4Conn {
@@ -38,12 +43,12 @@ func newV4Conn(conn net.Conn, psk []byte) *v4Conn {
 }
 
 func (c *v4Conn) initReader() error {
-	salt := make([]byte, v4SaltSize)
-	if _, err := io.ReadFull(c.Conn, salt); err != nil {
+	var salt [v4SaltSize]byte
+	if _, err := io.ReadFull(c.Conn, salt[:]); err != nil {
 		return err
 	}
 
-	aead, err := v4AEAD(c.psk, salt)
+	aead, err := v4AEAD(c.psk, salt[:])
 	if err != nil {
 		return err
 	}
@@ -61,19 +66,21 @@ func (c *v4Conn) initWriter() error {
 }
 
 func (c *v4Conn) Read(b []byte) (int, error) {
-	if c.r == nil {
-		if err := c.initReader(); err != nil {
-			return 0, err
-		}
+	c.rOnce.Do(func() {
+		c.rErr = c.initReader()
+	})
+	if c.rErr != nil {
+		return 0, c.rErr
 	}
 	return c.r.Read(b)
 }
 
 func (c *v4Conn) Write(b []byte) (int, error) {
-	if c.w == nil {
-		if err := c.initWriter(); err != nil {
-			return 0, err
-		}
+	c.wOnce.Do(func() {
+		c.wErr = c.initWriter()
+	})
+	if c.wErr != nil {
+		return 0, c.wErr
 	}
 	return c.w.Write(b)
 }
@@ -82,10 +89,11 @@ func (c *v4Conn) WritePacketFrame(b []byte) (int, error) {
 	if len(b) > maxLength {
 		return 0, errors.New("snell v4 frame too large")
 	}
-	if c.w == nil {
-		if err := c.initWriter(); err != nil {
-			return 0, err
-		}
+	c.wOnce.Do(func() {
+		c.wErr = c.initWriter()
+	})
+	if c.wErr != nil {
+		return 0, c.wErr
 	}
 
 	c.w.mux.Lock()
@@ -97,10 +105,11 @@ func (c *v4Conn) WritePacketFrame(b []byte) (int, error) {
 }
 
 func (c *v4Conn) WriteTo(w io.Writer) (int64, error) {
-	if c.r == nil {
-		if err := c.initReader(); err != nil {
-			return 0, err
-		}
+	c.rOnce.Do(func() {
+		c.rErr = c.initReader()
+	})
+	if c.rErr != nil {
+		return 0, c.rErr
 	}
 
 	var written int64
@@ -127,10 +136,11 @@ func (c *v4Conn) WriteTo(w io.Writer) (int64, error) {
 }
 
 func (c *v4Conn) ReadFrom(r io.Reader) (int64, error) {
-	if c.w == nil {
-		if err := c.initWriter(); err != nil {
-			return 0, err
-		}
+	c.wOnce.Do(func() {
+		c.wErr = c.initWriter()
+	})
+	if c.wErr != nil {
+		return 0, c.wErr
 	}
 
 	var read int64
@@ -161,6 +171,7 @@ type v4Reader struct {
 	aead  cipher.AEAD
 	nonce [v4NonceSize]byte
 	buf   []byte
+	frame []byte
 	mux   sync.Mutex
 }
 
@@ -182,12 +193,12 @@ func (r *v4Reader) Read(b []byte) (int, error) {
 }
 
 func (r *v4Reader) readFrame() ([]byte, error) {
-	headerCipher := make([]byte, v4HeaderCipherSize)
-	if _, err := io.ReadFull(r.Reader, headerCipher); err != nil {
+	var headerCipher [v4HeaderCipherSize]byte
+	if _, err := io.ReadFull(r.Reader, headerCipher[:]); err != nil {
 		return nil, err
 	}
 
-	header, err := r.aead.Open(headerCipher[:0], r.nonce[:], headerCipher, nil)
+	header, err := r.aead.Open(headerCipher[:0], r.nonce[:], headerCipher[:], nil)
 	incrementV4Nonce(r.nonce[:])
 	if err != nil {
 		return nil, err
@@ -209,7 +220,11 @@ func (r *v4Reader) readFrame() ([]byte, error) {
 	}
 
 	payloadCipherLength := payloadLength + r.aead.Overhead()
-	frame := make([]byte, paddingLength+payloadCipherLength)
+	frameLength := paddingLength + payloadCipherLength
+	if cap(r.frame) < frameLength {
+		r.frame = make([]byte, frameLength)
+	}
+	frame := r.frame[:frameLength]
 	if _, err := io.ReadFull(r.Reader, frame); err != nil {
 		return nil, err
 	}
@@ -232,6 +247,7 @@ type v4Writer struct {
 	nonce                [v4NonceSize]byte
 	salt                 [v4SaltSize]byte
 	saltSent             bool
+	buf                  []byte
 	initialPaddingLength uint16
 	payloadLimit         uint16
 	lastWrite            time.Time
@@ -327,39 +343,50 @@ func (w *v4Writer) writeFrame(payload []byte, paddingLength int) error {
 		return errors.New("snell v4 zero chunk with padding")
 	}
 
-	header := make([]byte, v4HeaderPlainSize)
+	var header [v4HeaderPlainSize]byte
 	header[0] = 4
 	binary.BigEndian.PutUint16(header[3:5], uint16(paddingLength))
 	binary.BigEndian.PutUint16(header[5:7], uint16(len(payload)))
 
-	headerCipher := w.aead.Seal(nil, w.nonce[:], header, nil)
+	var headerCipherBuf [v4HeaderCipherSize]byte
+	headerCipher := w.aead.Seal(headerCipherBuf[:0], w.nonce[:], header[:], nil)
 	incrementV4Nonce(w.nonce[:])
 
-	var payloadCipher []byte
+	payloadCipherLength := 0
 	if len(payload) > 0 {
-		payloadCipher = w.aead.Seal(nil, w.nonce[:], payload, nil)
-		incrementV4Nonce(w.nonce[:])
+		payloadCipherLength = len(payload) + w.aead.Overhead()
 	}
-
-	frameLength := len(headerCipher) + paddingLength + len(payloadCipher)
+	frameLength := len(headerCipher) + paddingLength + payloadCipherLength
 	if !w.saltSent {
 		frameLength += v4SaltSize
 	}
-	frame := make([]byte, 0, frameLength)
+	if cap(w.buf) < frameLength {
+		w.buf = make([]byte, 0, frameLength)
+	}
+	frame := w.buf[:0]
 	if !w.saltSent {
 		frame = append(frame, w.salt[:]...)
 		w.saltSent = true
 	}
 	frame = append(frame, headerCipher...)
+	paddingStart := len(frame)
 	if paddingLength > 0 {
-		padding, err := makeV4Padding(payloadCipher, paddingLength)
-		if err != nil {
+		frame = frame[:len(frame)+paddingLength]
+	}
+	payloadCipherStart := len(frame)
+	if len(payload) > 0 {
+		frame = w.aead.Seal(frame, w.nonce[:], payload, nil)
+		incrementV4Nonce(w.nonce[:])
+	}
+
+	if paddingLength > 0 {
+		padding := frame[paddingStart:payloadCipherStart]
+		payloadCipher := frame[payloadCipherStart:]
+		if err := fillV4Padding(padding, payloadCipher); err != nil {
 			return err
 		}
 		swapPadding(padding, payloadCipher)
-		frame = append(frame, padding...)
 	}
-	frame = append(frame, payloadCipher...)
 
 	return writeFull(w.Writer, frame)
 }
@@ -378,16 +405,28 @@ func makeV4Padding(payloadCipher []byte, paddingLength int) ([]byte, error) {
 	if paddingLength <= 0 {
 		return nil, nil
 	}
+	padding := make([]byte, paddingLength)
+	if err := fillV4Padding(padding, payloadCipher); err != nil {
+		return nil, err
+	}
+	return padding, nil
+}
+
+func fillV4Padding(padding, payloadCipher []byte) error {
+	paddingLength := len(padding)
+	if paddingLength <= 0 {
+		return nil
+	}
 
 	payloadOnes := countV4PayloadOnes(payloadCipher)
 	payloadZeros := 8*len(payloadCipher) - payloadOnes
 	if payloadZeros <= 0 {
-		return makeV4RandomPadding(paddingLength)
+		return fillV4RandomPadding(padding)
 	}
 
 	ratio := float64(payloadOnes) / float64(payloadZeros)
 	if ratio <= 0.5 || ratio >= 1.6 {
-		return makeV4RandomPadding(paddingLength)
+		return fillV4RandomPadding(padding)
 	}
 
 	targetRatioBase := 1.6
@@ -396,22 +435,21 @@ func makeV4Padding(payloadCipher []byte, paddingLength int) ([]byte, error) {
 	}
 	jitter, err := randomUnitFloat64()
 	if err != nil {
-		return nil, err
+		return err
 	}
 	targetRatio := targetRatioBase + jitter/10
 	totalBits := 8 * (paddingLength + len(payloadCipher))
 	targetOnes := int(float64(totalBits)*(targetRatio/(targetRatio+1)) - float64(payloadOnes))
 	if targetOnes < 0 || targetOnes > 8*paddingLength {
-		return makeV4RandomPadding(paddingLength)
+		return fillV4RandomPadding(padding)
 	}
 
-	return makeV4BitCountPadding(paddingLength, targetOnes)
+	return fillV4BitCountPadding(padding, targetOnes)
 }
 
 func countV4PayloadOnes(payloadCipher []byte) int {
-	limit := len(payloadCipher) &^ 3
 	ones := 0
-	for _, b := range payloadCipher[:limit] {
+	for _, b := range payloadCipher {
 		ones += bits.OnesCount8(b)
 	}
 	return ones
@@ -419,35 +457,57 @@ func countV4PayloadOnes(payloadCipher []byte) int {
 
 func makeV4RandomPadding(length int) ([]byte, error) {
 	padding := make([]byte, length)
+	if err := fillV4RandomPadding(padding); err != nil {
+		return nil, err
+	}
+	return padding, nil
+}
+
+func fillV4RandomPadding(padding []byte) error {
 	_, err := io.ReadFull(cryptorand.Reader, padding)
-	return padding, err
+	return err
 }
 
 func makeV4BitCountPadding(length, oneBits int) ([]byte, error) {
-	totalBits := 8 * length
-	if oneBits < 0 || oneBits > totalBits {
-		return nil, errors.New("snell v4 invalid padding bit count")
-	}
-
-	bitset := make([]byte, totalBits)
-	for i := 0; i < oneBits; i++ {
-		bitset[i] = 1
-	}
-	for i := totalBits - 1; i > 0; i-- {
-		j, err := cryptoRandomInt(i + 1)
-		if err != nil {
-			return nil, err
-		}
-		bitset[i], bitset[j] = bitset[j], bitset[i]
-	}
-
 	padding := make([]byte, length)
-	for i, bit := range bitset {
-		if bit == 1 {
-			padding[i/8] |= 1 << uint(i%8)
-		}
+	if err := fillV4BitCountPadding(padding, oneBits); err != nil {
+		return nil, err
 	}
 	return padding, nil
+}
+
+func fillV4BitCountPadding(padding []byte, oneBits int) error {
+	totalBits := 8 * len(padding)
+	if oneBits < 0 || oneBits > totalBits {
+		return errors.New("snell v4 invalid padding bit count")
+	}
+	if oneBits == 0 {
+		for i := range padding {
+			padding[i] = 0
+		}
+		return nil
+	}
+
+	var seed int64
+	if err := binary.Read(cryptorand.Reader, binary.LittleEndian, &seed); err != nil {
+		return err
+	}
+	rng := mrand.New(mrand.NewSource(seed))
+
+	positions := make([]uint32, totalBits)
+	for i := range positions {
+		positions[i] = uint32(i)
+	}
+	for i := range padding {
+		padding[i] = 0
+	}
+	for i := 0; i < oneBits; i++ {
+		j := i + rng.Intn(totalBits-i)
+		positions[i], positions[j] = positions[j], positions[i]
+		pos := positions[i]
+		padding[pos/8] |= byte(1 << (pos % 8))
+	}
+	return nil
 }
 
 func cryptoRandomInt(max int) (int, error) {

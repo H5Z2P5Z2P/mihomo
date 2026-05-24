@@ -101,6 +101,13 @@ func WriteHeader(conn net.Conn, host string, port uint, version int) error {
 }
 
 func WriteHeaderWithReuse(conn net.Conn, host string, port uint, version int, reuse bool) error {
+	if len(host) > 0xff {
+		return errors.New("snell host too long")
+	}
+	if port > 0xffff {
+		return errors.New("snell port out of range")
+	}
+
 	buf := pool.GetBuffer()
 	defer pool.PutBuffer(buf)
 	buf.WriteByte(Version)
@@ -116,7 +123,8 @@ func WriteHeaderWithReuse(conn net.Conn, host string, port uint, version int, re
 	// host & port
 	buf.WriteByte(uint8(len(host)))
 	buf.WriteString(host)
-	binary.Write(buf, binary.BigEndian, uint16(port))
+	buf.WriteByte(byte(port >> 8))
+	buf.WriteByte(byte(port))
 
 	if _, err := conn.Write(buf.Bytes()); err != nil {
 		return err
