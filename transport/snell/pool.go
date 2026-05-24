@@ -5,11 +5,14 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/metacubex/mihomo/component/pool"
 	"github.com/metacubex/mihomo/transport/shadowsocks/shadowaead"
 )
+
+const poolConnCloseDrainTimeout = time.Second
 
 type Pool struct {
 	pool    *pool.Pool[*Snell]
@@ -58,11 +61,13 @@ type PoolConn struct {
 	closeWriteErr  error
 	closeOnce      sync.Once
 	closeErr       error
+	peerHalfClosed atomic.Bool
 }
 
 func (pc *PoolConn) Read(b []byte) (int, error) {
 	n, err := pc.Snell.Read(b)
 	if err == shadowaead.ErrZeroChunk {
+		pc.peerHalfClosed.Store(true)
 		return n, io.EOF
 	}
 	return n, err
@@ -86,6 +91,10 @@ func (pc *PoolConn) Close() error {
 			_ = pc.Snell.Close()
 			return
 		}
+		if !pc.peerHalfClosed.Load() && !pc.drainPeerHalfClose() {
+			_ = pc.Snell.Close()
+			return
+		}
 
 		// mihomo use SetReadDeadline to break bidirectional copy between client and server.
 		// reset it before reuse connection to avoid io timeout error.
@@ -94,6 +103,26 @@ func (pc *PoolConn) Close() error {
 		pc.pool.put(pc.Snell)
 	})
 	return pc.closeErr
+}
+
+func (pc *PoolConn) drainPeerHalfClose() bool {
+	if err := pc.Snell.Conn.SetReadDeadline(time.Now().Add(poolConnCloseDrainTimeout)); err != nil {
+		return false
+	}
+
+	var buf [1024]byte
+	for {
+		_, err := pc.Snell.Read(buf[:])
+		switch err {
+		case nil:
+			continue
+		case shadowaead.ErrZeroChunk:
+			pc.peerHalfClosed.Store(true)
+			return true
+		default:
+			return false
+		}
+	}
 }
 
 func (pc *PoolConn) Discard() error {
@@ -108,7 +137,7 @@ func NewPool(factory func(context.Context) (*Snell, error)) *Pool {
 		func(ctx context.Context) (*Snell, error) {
 			return factory(ctx)
 		},
-		pool.WithAge[*Snell](8000),
+		pool.WithAge[*Snell](15000),
 		pool.WithSize[*Snell](10),
 		pool.WithEvict[*Snell](func(item *Snell) {
 			_ = item.Close()

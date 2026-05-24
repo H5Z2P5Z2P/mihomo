@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -315,6 +316,58 @@ func TestSnellWriteHeaderConnectCommand(t *testing.T) {
 	}
 }
 
+func TestSnellWriteHeaderRejectsInvalidAddress(t *testing.T) {
+	tests := []struct {
+		name string
+		host string
+		port uint
+	}{
+		{name: "long host", host: string(bytes.Repeat([]byte{'a'}, 256)), port: 443},
+		{name: "large port", host: "example.com", port: 65536},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := &bufferConn{}
+			if err := WriteHeaderWithReuse(conn, tt.host, tt.port, Version4, false); err == nil {
+				t.Fatal("expected invalid address error")
+			}
+			if conn.Len() != 0 {
+				t.Fatalf("invalid header should not be written, got %d bytes", conn.Len())
+			}
+		})
+	}
+}
+
+func TestSnellV4ConcurrentFirstWrite(t *testing.T) {
+	conn := newV4Conn(&bufferConn{}, []byte("password"))
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 16)
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := conn.Write([]byte("payload"))
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestSnellV4CountPayloadOnesIncludesTail(t *testing.T) {
+	if got, want := countV4PayloadOnes([]byte{0, 0, 0, 0xff, 0x0f}), 12; got != want {
+		t.Fatalf("ones = %d, want %d", got, want)
+	}
+}
+
 func TestSnellReadReplyPreservesBufferedPayload(t *testing.T) {
 	conn := &Snell{Conn: &bufferConn{}}
 	conn.Conn.(*bufferConn).Write([]byte{CommandTunnel, 'o', 'k'})
@@ -469,4 +522,43 @@ func decodeV4HeaderForTest(t *testing.T, data []byte) (int, int) {
 		t.Fatalf("invalid v4 header: %x", header)
 	}
 	return int(binary.BigEndian.Uint16(header[3:5])), int(binary.BigEndian.Uint16(header[5:7]))
+}
+
+func BenchmarkSnellV4WriteFrame(b *testing.B) {
+	writer, err := newV4Writer(io.Discard, []byte("password"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte("x"), 16*1024)
+
+	b.SetBytes(int64(len(payload)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := writer.Write(payload); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkSnellV4BitCountPadding(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if _, err := makeV4BitCountPadding(v4InitialPaddingMin, 900); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkEncodeQUICEnvelope(b *testing.B) {
+	inner := bytes.Repeat([]byte("x"), 1200)
+
+	b.SetBytes(int64(len(inner)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := EncodeQUICEnvelope([]byte("password"), "example.com", 443, inner); err != nil {
+			b.Fatal(err)
+		}
+	}
 }
