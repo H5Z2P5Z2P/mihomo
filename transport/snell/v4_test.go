@@ -541,6 +541,32 @@ func BenchmarkSnellV4WriteFrame(b *testing.B) {
 	}
 }
 
+func BenchmarkSnellV4ReadFrame(b *testing.B) {
+	const payloadSize = 16 * 1024
+	payload := bytes.Repeat([]byte("x"), payloadSize)
+
+	var raw bytes.Buffer
+	writer, err := newV4Writer(&raw, []byte("password"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	if _, err = writer.Write(payload); err != nil {
+		b.Fatal(err)
+	}
+	frameData := raw.Bytes()
+
+	b.SetBytes(payloadSize)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		conn := newV4Conn(&bufferConn{Buffer: *bytes.NewBuffer(frameData)}, []byte("password"))
+		buf := make([]byte, payloadSize)
+		if _, err = io.ReadFull(conn, buf); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func BenchmarkSnellV4BitCountPadding(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
